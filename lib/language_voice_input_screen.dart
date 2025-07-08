@@ -107,7 +107,7 @@ class _LanguageVoiceInputScreenState extends State<LanguageVoiceInputScreen> {
         if (data != null) {
           _pipelineConfigResponse = data; // Store the full response for later parsing
           
-          // Extract dynamic inference API endpoint and key
+          // Extract dynamic inference endpoint and API key
           if (data['pipelineInferenceAPIEndPoint'] != null) {
             _bhashiniInferenceBaseUrl = data['pipelineInferenceAPIEndPoint']['callbackUrl'];
             _bhashiniInferenceApiKey = data['pipelineInferenceAPIEndPoint']['inferenceApiKey']['value'];
@@ -118,7 +118,7 @@ class _LanguageVoiceInputScreenState extends State<LanguageVoiceInputScreen> {
           }
 
           if (_bhashiniInferenceBaseUrl == null || _bhashiniInferenceApiKey == null) {
-             _errorMessage = 'Failed to get Bhashini inference API details. Check Bhashini configuration.';
+              _errorMessage = 'Failed to get Bhashini inference API details. Check Bhashini configuration.';
           }
         } else {
           _errorMessage = 'Invalid pipeline configuration response (empty data).';
@@ -349,7 +349,7 @@ class _LanguageVoiceInputScreenState extends State<LanguageVoiceInputScreen> {
       return true;
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Microphone permission required to record audio.')),
+        const SnackBar(content: Text('Microphone permission required to record audio.')),
       );
       return false;
     }
@@ -692,7 +692,7 @@ class _LanguageVoiceInputScreenState extends State<LanguageVoiceInputScreen> {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (context) => SummaryScreen(translatedText: _translatedText),
+                          builder: (context) => SummaryScreen(conversationText: _translatedText), // Corrected parameter name
                         ),
                       );
                     }

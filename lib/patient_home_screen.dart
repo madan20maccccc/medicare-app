@@ -1,20 +1,20 @@
 // lib/patient_home_screen.dart
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:google_sign_in/google_sign_in.dart';
-// No need for cloud_firestore import if not directly used in this screen
-// import 'package:cloud_firestore/cloud_firestore.dart';
+// import 'package:google_sign_in/google_sign_in.dart'; // Removed: Assuming patients don't use Google Sign-In for direct login anymore
 import 'package:medicare/role_selection_screen.dart';
-import 'package:medicare/profile_screen.dart';
+import 'package:medicare/profile_screen.dart'; // For viewing/editing profile
 import 'package:medicare/settings_screen.dart';
+// No need to import patient_details_form_screen.dart here, as navigation is from RoleSelectionScreen
 
 // Global variables provided by the Canvas environment
 const String __app_id = String.fromEnvironment('APP_ID', defaultValue: 'default-app-id');
 
 class PatientHomeScreen extends StatefulWidget {
   final String patientName;
+  final String? patientId; // Patient ID (UUID) passed from PatientDetailsFormScreen
 
-  const PatientHomeScreen({super.key, required this.patientName});
+  const PatientHomeScreen({super.key, required this.patientName, this.patientId});
 
   @override
   State<PatientHomeScreen> createState() => _PatientHomeScreenState();
@@ -22,20 +22,24 @@ class PatientHomeScreen extends StatefulWidget {
 
 class _PatientHomeScreenState extends State<PatientHomeScreen> {
   String _currentPatientName = 'Patient';
+  String? _currentPatientId; // State variable for patient ID
   final FirebaseAuth _auth = FirebaseAuth.instance;
-  final GoogleSignIn _googleSignIn = GoogleSignIn();
+  // final GoogleSignIn _googleSignIn = GoogleSignIn(); // Removed: No longer needed if patients don't use Google Sign-In
 
   @override
   void initState() {
     super.initState();
     _currentPatientName = widget.patientName;
+    _currentPatientId = widget.patientId; // Initialize patient ID from widget
   }
 
   Future<void> _logout() async {
     try {
       await _auth.signOut();
-      await _googleSignIn.signOut();
+      // No GoogleSignIn.signOut() call needed if patients don't use it.
+      // If a doctor uses GoogleSignIn, their logout will handle it.
       if (mounted) {
+        // Navigate back to the role selection screen and remove all previous routes
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (context) => const RoleSelectionScreen()),
           (Route<dynamic> route) => false,
@@ -43,22 +47,26 @@ class _PatientHomeScreenState extends State<PatientHomeScreen> {
       }
     } catch (e) {
       print('Error during logout: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Logout failed: $e')),
+        );
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    // Get the current theme to access its properties safely
     final ThemeData currentTheme = Theme.of(context);
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Patient Home'),
-        backgroundColor: currentTheme.appBarTheme.backgroundColor, // Use currentTheme
+        backgroundColor: currentTheme.appBarTheme.backgroundColor,
         elevation: currentTheme.appBarTheme.elevation,
         actions: [
           IconButton(
-            icon: Icon(Icons.settings, color: currentTheme.appBarTheme.iconTheme?.color), // Use currentTheme
+            icon: Icon(Icons.settings, color: currentTheme.appBarTheme.iconTheme?.color),
             tooltip: 'Settings',
             onPressed: () {
               Navigator.push(
@@ -68,9 +76,12 @@ class _PatientHomeScreenState extends State<PatientHomeScreen> {
             },
           ),
           IconButton(
-            icon: Icon(Icons.person, color: currentTheme.appBarTheme.iconTheme?.color), // Use currentTheme
+            icon: Icon(Icons.person, color: currentTheme.appBarTheme.iconTheme?.color),
             tooltip: 'My Profile',
             onPressed: () {
+              // Navigate to ProfileScreen. ProfileScreen will fetch details based on current user's UID.
+              // For patients coming from PatientDetailsFormScreen, their UID is the anonymous UID,
+              // and ProfileScreen will then look up their details in the public/patients/data collection.
               Navigator.push(
                 context,
                 MaterialPageRoute(builder: (context) => const ProfileScreen()),
@@ -78,51 +89,60 @@ class _PatientHomeScreenState extends State<PatientHomeScreen> {
             },
           ),
           IconButton(
-            icon: Icon(Icons.logout, color: currentTheme.appBarTheme.iconTheme?.color), // Use currentTheme
+            icon: Icon(Icons.logout, color: currentTheme.appBarTheme.iconTheme?.color),
             tooltip: 'Logout',
             onPressed: _logout,
           ),
         ],
       ),
-      backgroundColor: currentTheme.scaffoldBackgroundColor, // Use currentTheme
+      backgroundColor: currentTheme.scaffoldBackgroundColor,
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.center,
             children: <Widget>[
               Icon(
-                Icons.health_and_safety,
+                Icons.person_outline, // Patient-like icon
                 size: 100,
-                color: currentTheme.primaryColor, // Use currentTheme
+                color: currentTheme.primaryColor,
               ),
               const SizedBox(height: 30),
               Text(
                 'Welcome, $_currentPatientName!',
-                style: currentTheme.textTheme.titleLarge, // Use currentTheme
+                style: currentTheme.textTheme.titleLarge,
                 textAlign: TextAlign.center,
               ),
+              if (_currentPatientId != null) // Display patient ID if available
+                Padding(
+                  padding: const EdgeInsets.only(top: 8.0),
+                  child: Text(
+                    'Your Patient ID: $_currentPatientId',
+                    style: currentTheme.textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
               const SizedBox(height: 20),
               Text(
-                'Your health information at a glance.',
-                style: currentTheme.textTheme.bodyMedium, // Use currentTheme
+                'How can we assist you today?',
+                style: currentTheme.textTheme.bodyMedium,
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 50),
               ElevatedButton.icon(
                 onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Starting voice recording for form... (Next Step!)')),
+                  // Navigate to ProfileScreen for viewing/editing their own details
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => const ProfileScreen()),
                   );
                 },
-                icon: const Icon(Icons.mic, size: 28),
+                icon: const Icon(Icons.account_circle, size: 28), // Changed icon
                 label: const Text(
-                  'Start Recording Symptoms',
+                  'View My Profile', // Changed label
                   style: TextStyle(fontSize: 20),
                 ),
                 style: ElevatedButton.styleFrom(
-                  // Safely resolve MaterialStateProperty<Color?> to Color?
                   backgroundColor: currentTheme.elevatedButtonTheme.style?.backgroundColor?.resolve(MaterialState.values.toSet()) ?? currentTheme.primaryColor,
                   foregroundColor: currentTheme.elevatedButtonTheme.style?.foregroundColor?.resolve(MaterialState.values.toSet()) ?? currentTheme.colorScheme.onPrimary,
                   padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
@@ -134,26 +154,25 @@ class _PatientHomeScreenState extends State<PatientHomeScreen> {
                 ),
               ),
               const SizedBox(height: 20),
-              OutlinedButton.icon(
+              ElevatedButton.icon(
                 onPressed: () {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Viewing your records... (Coming Soon!)')),
+                    const SnackBar(content: Text('Viewing appointments (Feature coming soon!)')),
                   );
                 },
-                icon: const Icon(Icons.folder_open, size: 28),
+                icon: const Icon(Icons.calendar_today, size: 28),
                 label: const Text(
-                  'View My Records',
+                  'View My Appointments',
                   style: TextStyle(fontSize: 20),
                 ),
-                style: OutlinedButton.styleFrom(
-                  // Safely resolve MaterialStateProperty<Color?> to Color?
-                  foregroundColor: currentTheme.textButtonTheme.style?.foregroundColor?.resolve(MaterialState.values.toSet()) ?? currentTheme.primaryColor,
-                  side: BorderSide(color: currentTheme.primaryColor, width: 2), // Use currentTheme.primaryColor for border
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orange, // Specific color for this button
+                  foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(30),
                   ),
-                  elevation: 0,
+                  elevation: 5,
                   minimumSize: Size(MediaQuery.of(context).size.width * 0.7, 60),
                 ),
               ),

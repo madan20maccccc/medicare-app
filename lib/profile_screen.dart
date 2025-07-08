@@ -2,7 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:google_sign_in/google_sign_in.dart';
+import 'package:google_sign_in/google_sign_in.dart'; // Keep if Google Sign-In is used
 import 'package:medicare/role_selection_screen.dart';
 import 'package:medicare/complete_profile_screen.dart';
 
@@ -27,6 +27,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String _userAge = 'N/A';
   String _userGender = 'N/A';
   String _userPhone = 'N/A';
+  String _userAddress = 'N/A'; // Added address
+  String _userChiefComplaint = 'N/A'; // Added chief complaint
+  String? _patientFirebaseId; // Store the patient's ID if fetched from public/patients
   bool _receivePdfPermission = false;
 
   bool _isLoading = true;
@@ -55,6 +58,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
 
     try {
+      // First, try to fetch from the 'users' collection (where doctors and email/password patients are)
       final userDoc = await _db
           .collection('artifacts')
           .doc(__app_id)
@@ -71,17 +75,44 @@ class _ProfileScreenState extends State<ProfileScreen> {
           _userAge = userData['age']?.toString() ?? 'N/A';
           _userGender = userData['gender'] as String? ?? 'N/A';
           _userPhone = userData['phoneNumber'] as String? ?? 'N/A';
-
-          if (_userRole == 'patient') {
-            _receivePdfPermission = userData['receivePdfPermission'] as bool? ?? false;
-          }
+          _userAddress = userData['address'] as String? ?? 'N/A'; // Fetch address
+          _userChiefComplaint = userData['chiefComplaint'] as String? ?? 'N/A'; // Fetch chief complaint
+          _receivePdfPermission = userData['receivePdfPermission'] as bool? ?? false;
           _isLoading = false;
         });
       } else {
-        setState(() {
-          _errorMessage = 'User profile not found in Firestore. Please complete your profile.';
-          _isLoading = false;
-        });
+        // If not found in 'users' collection, check the 'public/patients/data' collection
+        // This handles patients who filled out the form without a direct user login
+        final patientDoc = await _db
+            .collection('artifacts')
+            .doc(__app_id)
+            .collection('public')
+            .doc('patients')
+            .collection('data')
+            .doc(user.uid) // Assuming patientId is their Firebase UID if they signed in anonymously
+            .get();
+
+        if (patientDoc.exists && patientDoc.data() != null) {
+          final patientData = patientDoc.data()!;
+          setState(() {
+            _userName = patientData['name'] as String? ?? 'N/A';
+            _userEmail = patientData['email'] as String? ?? user.email ?? 'N/A';
+            _userRole = 'patient'; // Explicitly set role for patients from this collection
+            _userAge = patientData['age']?.toString() ?? 'N/A';
+            _userGender = patientData['gender'] as String? ?? 'N/A';
+            _userPhone = patientData['contactNumber'] as String? ?? 'N/A'; // Note: 'contactNumber' for patients
+            _userAddress = patientData['address'] as String? ?? 'N/A'; // Fetch address
+            _userChiefComplaint = patientData['chiefComplaint'] as String? ?? 'N/A'; // Fetch chief complaint
+            _receivePdfPermission = patientData['receivePdfPermission'] as bool? ?? false; // Assuming this field exists for patients too
+            _patientFirebaseId = patientData['id'] as String?; // Store the patient's UUID
+            _isLoading = false;
+          });
+        } else {
+          setState(() {
+            _errorMessage = 'User profile not found. Please complete your profile.';
+            _isLoading = false;
+          });
+        }
       }
     } catch (e) {
       setState(() {
@@ -98,7 +129,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
     });
     try {
       await _auth.signOut();
-      await _googleSignIn.signOut();
+      // Only attempt Google sign out if they were signed in with Google
+      if (await _googleSignIn.isSignedIn()) {
+        await _googleSignIn.signOut();
+      }
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (context) => const RoleSelectionScreen()),
@@ -135,108 +169,114 @@ class _ProfileScreenState extends State<ProfileScreen> {
               child: CircularProgressIndicator(),
             )
           : _errorMessage.isNotEmpty
-              ? Center(
-                  child: Padding(
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24.0),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.error_outline, color: Colors.red, size: 60),
+                          const SizedBox(height: 20),
+                          Text(
+                            _errorMessage,
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: Colors.red),
+                          ),
+                          const SizedBox(height: 20),
+                          ElevatedButton(
+                            onPressed: _fetchUserProfile,
+                            child: const Text('Retry'),
+                          ),
+                          const SizedBox(height: 10),
+                          ElevatedButton(
+                            onPressed: _logout,
+                            child: const Text('Logout'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                : SingleChildScrollView(
                     padding: const EdgeInsets.all(24.0),
                     child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.error_outline, color: Colors.red, size: 60),
-                        const SizedBox(height: 20),
-                        Text(
-                          _errorMessage,
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: Colors.red),
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Center(
+                          child: Icon(
+                            _userRole == 'doctor' ? Icons.medical_services : Icons.person_outline,
+                            size: 100,
+                            color: Theme.of(context).primaryColor,
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                        _buildProfileCard(
+                          context,
+                          title: 'Personal Information',
+                          children: [
+                            _buildProfileDetail('Name', _userName, Icons.person),
+                            _buildProfileDetail('Email', _userEmail, Icons.email),
+                            _buildProfileDetail('Role', _userRole.toUpperCase(), Icons.assignment_ind),
+                            if (_userRole == 'patient' && _patientFirebaseId != null) // Show patient's UUID
+                              _buildProfileDetail('Patient ID', _patientFirebaseId!, Icons.badge),
+                            _buildProfileDetail('Age', _userAge, Icons.cake),
+                            _buildProfileDetail('Gender', _userGender, Icons.wc),
+                            _buildProfileDetail('Phone Number', _userPhone, Icons.phone),
+                            _buildProfileDetail('Address', _userAddress, Icons.location_on), // Display address
+                            if (_userRole == 'patient') // Only show chief complaint for patients
+                              _buildProfileDetail('Chief Complaint', _userChiefComplaint, Icons.sick), // Display chief complaint
+                          ],
                         ),
                         const SizedBox(height: 20),
-                        ElevatedButton(
-                          onPressed: _fetchUserProfile,
-                          child: const Text('Retry'),
-                        ),
-                        const SizedBox(height: 10),
-                        ElevatedButton(
-                          onPressed: _logout,
-                          child: const Text('Logout'),
+                        if (_userRole == 'patient')
+                          _buildProfileCard(
+                            context,
+                            title: 'Permissions',
+                            children: [
+                              _buildProfileDetail(
+                                'Receive OPD PDFs',
+                                _receivePdfPermission ? 'Allowed' : 'Denied',
+                                _receivePdfPermission ? Icons.check_circle_outline : Icons.cancel_outlined,
+                                valueColor: _receivePdfPermission ? Colors.green : Colors.red,
+                              ),
+                            ],
+                          ),
+                        const SizedBox(height: 30),
+                        Center(
+                          child: ElevatedButton.icon(
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => CompleteProfileScreen(
+                                    userId: _auth.currentUser!.uid,
+                                    email: _userEmail,
+                                    role: _userRole,
+                                  ),
+                                ),
+                              ).then((_) {
+                                // Refresh profile data when returning from CompleteProfileScreen
+                                _fetchUserProfile();
+                              });
+                            },
+                            icon: const Icon(Icons.edit, size: 24),
+                            label: const Text(
+                              'Edit Profile',
+                              style: TextStyle(fontSize: 18),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Theme.of(context).elevatedButtonTheme.style?.backgroundColor?.resolve(MaterialState.values.toSet()),
+                              foregroundColor: Theme.of(context).elevatedButtonTheme.style?.foregroundColor?.resolve(MaterialState.values.toSet()),
+                              padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 12),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(30),
+                              ),
+                              elevation: 5,
+                            ),
+                          ),
                         ),
                       ],
                     ),
                   ),
-                )
-              : SingleChildScrollView(
-                  padding: const EdgeInsets.all(24.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Center(
-                        child: Icon(
-                          _userRole == 'doctor' ? Icons.medical_services : Icons.person_outline,
-                          size: 100,
-                          color: Theme.of(context).primaryColor,
-                        ),
-                      ),
-                      const SizedBox(height: 30),
-                      _buildProfileCard(
-                        context,
-                        title: 'Personal Information',
-                        children: [
-                          _buildProfileDetail('Name', _userName, Icons.person),
-                          _buildProfileDetail('Email', _userEmail, Icons.email),
-                          _buildProfileDetail('Role', _userRole.toUpperCase(), Icons.assignment_ind),
-                          _buildProfileDetail('Age', _userAge, Icons.cake),
-                          _buildProfileDetail('Gender', _userGender, Icons.wc),
-                          _buildProfileDetail('Phone Number', _userPhone, Icons.phone),
-                        ],
-                      ),
-                      const SizedBox(height: 20),
-                      if (_userRole == 'patient')
-                        _buildProfileCard(
-                          context,
-                          title: 'Permissions',
-                          children: [
-                            _buildProfileDetail(
-                              'Receive OPD PDFs',
-                              _receivePdfPermission ? 'Allowed' : 'Denied',
-                              _receivePdfPermission ? Icons.check_circle_outline : Icons.cancel_outlined,
-                              valueColor: _receivePdfPermission ? Colors.green : Colors.red,
-                            ),
-                          ],
-                        ),
-                      const SizedBox(height: 30),
-                      Center(
-                        child: ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => CompleteProfileScreen(
-                                  userId: _auth.currentUser!.uid,
-                                  email: _userEmail,
-                                  role: _userRole,
-                                ),
-                              ),
-                            ).then((_) {
-                              _fetchUserProfile();
-                            });
-                          },
-                          icon: const Icon(Icons.edit, size: 24),
-                          label: const Text(
-                            'Edit Profile',
-                            style: TextStyle(fontSize: 18),
-                          ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Theme.of(context).elevatedButtonTheme.style?.backgroundColor?.resolve(MaterialState.values.toSet()),
-                            foregroundColor: Theme.of(context).elevatedButtonTheme.style?.foregroundColor?.resolve(MaterialState.values.toSet()),
-                            padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 12),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(30),
-                            ),
-                            elevation: 5,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
     );
   }
 
@@ -270,10 +310,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start, // Align items to the start of the cross axis
         children: [
           Icon(icon, color: Theme.of(context).iconTheme.color, size: 20),
           const SizedBox(width: 15),
-          Expanded(
+          Expanded( // Ensure the column takes remaining space
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -285,9 +326,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 Text(
                   value,
                   style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        fontWeight: FontWeight.bold,
-                        color: valueColor ?? Theme.of(context).textTheme.bodyLarge?.color,
-                      ),
+                          fontWeight: FontWeight.bold,
+                          color: valueColor ?? Theme.of(context).textTheme.bodyLarge?.color,
+                        ),
+                  softWrap: true, // Allow text to wrap
+                  overflow: TextOverflow.visible, // Or .ellipsis if you prefer truncation
                 ),
               ],
             ),
