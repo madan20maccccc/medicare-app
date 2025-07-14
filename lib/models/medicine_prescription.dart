@@ -53,6 +53,8 @@ class MedicinePrescription {
     );
   }
 
+  get durationUnit => null;
+
   // Helper to get field by name for TextEditingController syncing
   String getField(String fieldName) {
     switch (fieldName) {

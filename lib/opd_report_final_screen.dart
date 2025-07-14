@@ -8,6 +8,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart'; // For PDF preview and printing
 import 'package:medicare/models/medicine_prescription.dart'; // Import the medicine model
 import 'package:medicare/doctor_home_screen.dart'; // For navigation back to doctor home
+import 'dart:typed_data'; // For Uint8List
 
 // Global variables provided by the Canvas environment
 const String __app_id = String.fromEnvironment('APP_ID', defaultValue: 'default-app-id');
@@ -278,7 +279,7 @@ class _OpdReportFinalScreenState extends State<OpdReportFinalScreen> {
               pw.Text('Prescribed Medicines:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
               pw.SizedBox(height: 10),
               if (medicines.isEmpty)
-                pw.Text('No medicines prescribed.', style: const pw.TextStyle(fontStyle: pw.FontStyle.italic))
+                pw.Text('No medicines prescribed.', style: pw.TextStyle(fontStyle: pw.FontStyle.italic))
               else
                 pw.Table.fromTextArray(
                   headers: ['Medicine', 'Dosage', 'Duration', 'Frequency', 'Timing'],

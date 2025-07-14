@@ -92,4 +92,6 @@ class DataLoader extends ChangeNotifier {
       throw Exception('Could not load $fileName.csv from assets. Please ensure it exists and is valid.');
     }
   }
+
+  Future loadCsvData(String s) async {}
 }
