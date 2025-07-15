@@ -1,7 +1,7 @@
 // lib/services/data_loader.dart
 import 'package:flutter/foundation.dart'; // For ChangeNotifier
 import 'package:flutter/services.dart' show rootBundle; // For loading assets
-import 'package:csv/csv.dart'; // For CSV parsing
+import 'dart:convert'; // For JSON decoding
 
 class DataLoader extends ChangeNotifier {
   bool _isLoaded = false;
@@ -16,7 +16,11 @@ class DataLoader extends ChangeNotifier {
   // Getter for medicine names specifically
   List<String> get medicineNames {
     if (_loadedData.containsKey('medicines')) {
-      return _loadedData['medicines']!.map((e) => e['name'].toString()).toList();
+      // Ensure 'name' field exists and is a String, then map
+      return _loadedData['medicines']!
+          .where((e) => e.containsKey('name') && e['name'] is String)
+          .map((e) => e['name'].toString())
+          .toList();
     }
     return [];
   }
@@ -26,12 +30,12 @@ class DataLoader extends ChangeNotifier {
     loadData();
   }
 
-  // Method to get loaded data for a specific file
-  List<Map<String, dynamic>>? getLoadedData(String fileName) {
-    return _loadedData[fileName];
+  // Method to get loaded data for a specific key (e.g., 'medicines')
+  List<Map<String, dynamic>>? getLoadedData(String keyName) {
+    return _loadedData[keyName];
   }
 
-  // Main method to load all necessary CSV data
+  // Main method to load all necessary data (now only JSON for medicines)
   Future<void> loadData() async {
     if (_isLoaded || _loadError != null) {
       // Avoid reloading if already loaded or failed
@@ -45,8 +49,7 @@ class DataLoader extends ChangeNotifier {
     notifyListeners(); // Notify listeners that loading has started
 
     try {
-      await _loadCsvFile('medicines');
-      await _loadCsvFile('symptoms');
+      await _loadJsonFile('medicines_combined', 'medicines'); // Load JSON for medicines
       
       _isLoaded = true;
       _loadError = null;
@@ -60,36 +63,21 @@ class DataLoader extends ChangeNotifier {
     }
   }
 
-  // Helper method to load a single CSV file
-  Future<void> _loadCsvFile(String fileName) async {
-    print('DataLoader: Attempting to load $fileName from assets...');
+  // Helper method to load a single JSON file
+  Future<void> _loadJsonFile(String fileNameWithoutExtension, String keyToStore) async {
+    print('DataLoader: Attempting to load $fileNameWithoutExtension.json from assets...');
     try {
-      final rawCsv = await rootBundle.loadString('assets/$fileName.csv');
-      List<List<dynamic>> csvTable = const CsvToListConverter().convert(rawCsv);
+      final String jsonString = await rootBundle.loadString('assets/$fileNameWithoutExtension.json');
+      final List<dynamic> jsonList = json.decode(jsonString);
 
-      if (csvTable.isNotEmpty) {
-        List<String> headers = csvTable[0].map((e) => e.toString()).toList();
-        List<Map<String, dynamic>> data = [];
+      // Ensure the decoded JSON is a List of Maps
+      List<Map<String, dynamic>> data = jsonList.cast<Map<String, dynamic>>();
 
-        for (int i = 1; i < csvTable.length; i++) {
-          Map<String, dynamic> row = {};
-          for (int j = 0; j < headers.length; j++) {
-            if (j < csvTable[i].length) { // Ensure index is within bounds
-              row[headers[j]] = csvTable[i][j];
-            } else {
-              row[headers[j]] = null; // Handle missing values gracefully
-            }
-          }
-          data.add(row);
-        }
-        _loadedData[fileName] = data;
-        print('DataLoader: Successfully loaded $fileName. Number of entries: ${data.length}');
-      } else {
-        throw Exception('CSV file $fileName.csv is empty or malformed.');
-      }
+      _loadedData[keyToStore] = data;
+      print('DataLoader: Successfully loaded $fileNameWithoutExtension.json. Number of entries: ${data.length}');
     } catch (e) {
-      print('DataLoader: WARNING: Document $fileName.csv not found in assets or failed to parse: $e');
-      throw Exception('Could not load $fileName.csv from assets. Please ensure it exists and is valid.');
+      print('DataLoader: WARNING: Document $fileNameWithoutExtension.json not found in assets or failed to parse: $e');
+      throw Exception('Could not load $fileNameWithoutExtension.json from assets. Please ensure it exists and is valid JSON.');
     }
   }
 

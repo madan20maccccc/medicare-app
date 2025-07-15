@@ -1,4 +1,3 @@
-// lib/summary_screen.dart
 import 'package:flutter/material.dart';
 import 'package:dio/dio.dart'; // For making HTTP requests
 import 'dart:convert'; // For JSON encoding/decoding
@@ -9,19 +8,15 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 // Import the new MedicinesListScreen
 import 'package:medicare/medicines_list_screen.dart';
+import 'package:medicare/services/data_loader.dart';
 
 // Global variables provided by the Canvas environment
-// These are used for Firebase initialization and authentication.
-// DO NOT modify these.
 const String __app_id = String.fromEnvironment('APP_ID', defaultValue: 'default-app-id');
 const String __firebase_config = String.fromEnvironment('FIREBASE_CONFIG', defaultValue: '{}');
 const String __initial_auth_token = String.fromEnvironment('INITIAL_AUTH_TOKEN', defaultValue: '');
 
-
 class SummaryScreen extends StatefulWidget {
-  // Renamed for clarity: this is the raw conversation text for summary generation
   final String conversationText;
-
   const SummaryScreen({super.key, required this.conversationText});
 
   @override
@@ -29,20 +24,13 @@ class SummaryScreen extends StatefulWidget {
 }
 
 class _SummaryScreenState extends State<SummaryScreen> {
-  // Gemini API Details
-  // IMPORTANT: Using the API key provided by the user directly.
-  final String _geminiApiKey = 'AIzaSyCXmcg_aOEwg38airIbs14C0SqZK6b_UTo'; // <-- Your actual API key
-  // Use the specific model from your Colab: gemini-1.5-flash
-  final String _geminiModel = 'gemini-1.5-flash';
-  // Base URL for the Gemini API endpoint
-  final String _geminiApiBaseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/';
+  final String _backendBaseUrl = 'http://192.168.29.68:5000';
 
   String _generatedSummary = 'Generating summary...';
   bool _isLoadingSummary = true;
   String _summaryErrorMessage = '';
   late TextEditingController _summaryController;
 
-  // Firestore instance and user ID
   late FirebaseFirestore _db;
   late FirebaseAuth _auth;
   String? _userId;
@@ -51,17 +39,14 @@ class _SummaryScreenState extends State<SummaryScreen> {
   void initState() {
     super.initState();
     _summaryController = TextEditingController(text: _generatedSummary);
-    _initializeFirebaseAndGenerateSummary(); // Combined initialization and summary generation
+    _initializeFirebaseAndGenerateSummary();
   }
 
   Future<void> _initializeFirebaseAndGenerateSummary() async {
     try {
-      // Initialize Firebase instances
       _db = FirebaseFirestore.instance;
       _auth = FirebaseAuth.instance;
 
-      // Ensure user is authenticated and get UID
-      // This part is crucial for Firestore security rules
       if (_auth.currentUser == null) {
         if (__initial_auth_token.isNotEmpty) {
           await _auth.signInWithCustomToken(__initial_auth_token);
@@ -70,173 +55,55 @@ class _SummaryScreenState extends State<SummaryScreen> {
         }
       }
       _userId = _auth.currentUser?.uid;
-      print('Firebase: Current User ID in SummaryScreen: $_userId');
 
       if (_userId == null) {
         _summaryErrorMessage = 'User not authenticated. Cannot save summary.';
-        setState(() {
-          _isLoadingSummary = false;
-        });
+        setState(() => _isLoadingSummary = false);
         return;
       }
 
-      // Now proceed with generating the summary
       _generateSummary();
-
     } catch (e) {
       _summaryErrorMessage = 'Error initializing Firebase for SummaryScreen: $e';
-      print('Error initializing Firebase for SummaryScreen: $e');
-      setState(() {
-        _isLoadingSummary = false;
-      });
+      setState(() => _isLoadingSummary = false);
     }
   }
 
-  // Function to call Gemini API for summarization
+  // 🧠 Updated to handle NER response and format summary
   Future<void> _generateSummary() async {
   setState(() {
     _isLoadingSummary = true;
     _summaryErrorMessage = '';
-    _generatedSummary = 'Generating summary...';
-    _summaryController.text = _generatedSummary;
   });
 
   final Dio dio = Dio();
-
-  // REVISED PROMPT
-  final prompt = """
-You are a highly skilled medical transcription assistant.
-Your task is to analyze the following doctor-patient conversation and generate a comprehensive, structured Outpatient Department (OPD) summary.
-
-**Extract all relevant medical information and present it clearly under the specified headings.**
-**If a section's information is not explicitly mentioned or is unclear, use "N/A" for that specific field.**
-
-**Output Format (Strictly adhere to this structure):**
-
---- OPD SUMMARY ---
-**Date of Consultation:** ${DateTime.now().toLocal().toString().split(' ')[0]}
-**Patient ID:** N/A (or extract if available in conversation)
-**Doctor ID:** N/A (or extract if available in conversation)
-
-**Chief Complaint (CC):** [Patient's primary reason for visit]
-
-**History of Present Illness (HPI):**
-- **Onset:** 
-- **Duration:** 
-- **Character:** 
-- **Location:** 
-- **Severity:** 
-- **Associated Symptoms:** 
-- **Aggravating Factors:** 
-- **Relieving Factors:** 
-- **Past Medical History:** 
-
-**Review of Systems (ROS):** 
-
-**Provisional Diagnosis:** 
-
-**Medications Prescribed:**
-- **[Medicine Name 1]:**
-  - **Dosage:** 
-  - **Frequency:** 
-  - **Duration:** 
-  - **Timing:** 
-(Add more if needed or say "No new medications prescribed.")
-
-**Investigations/Tests Recommended:** 
-
-**Advice/Instructions:**
-- 
-- 
-
---- END OF OPD SUMMARY ---
-
-Here is the doctor-patient conversation to summarize:
-${widget.conversationText}
-""";
-
-  final chatHistory = [
-    {"role": "user", "parts": [{"text": prompt}]}
-  ];
-
-  final payload = {
-    "contents": chatHistory,
-  };
-
-  final fullGeminiApiUrl =
-      '$_geminiApiBaseUrl$_geminiModel:generateContent?key=$_geminiApiKey';
-
-  print('DEBUG: Gemini Request URL: $fullGeminiApiUrl');
-  print('DEBUG: Gemini Request Body: ${jsonEncode(payload)}');
+  final url = '$_backendBaseUrl/ner';
 
   try {
-    Response response;
-    int retryCount = 0;
-    bool requestSuccessful = false;
+    final response = await dio.post(url, data: {"text": widget.conversationText});
 
-    while (retryCount < 3 && !requestSuccessful) {
-      try {
-        response = await dio.post(
-          fullGeminiApiUrl,
-          options: Options(headers: {
-            'Content-Type': 'application/json',
-          }),
-          data: jsonEncode(payload),
-        );
-
-        if (response.statusCode == 200) {
-          requestSuccessful = true;
-          final data = response.data;
-          print('DEBUG: Gemini Response Data: $data');
-
-          if (data != null &&
-              data['candidates'] != null &&
-              data['candidates'].isNotEmpty &&
-              data['candidates'][0]['content'] != null &&
-              data['candidates'][0]['content']['parts'] != null &&
-              data['candidates'][0]['content']['parts'].isNotEmpty) {
-            final summary =
-                data['candidates'][0]['content']['parts'][0]['text'];
-            setState(() {
-              _generatedSummary = summary;
-              _summaryController.text = summary;
-            });
-          } else {
-            _summaryErrorMessage = 'Invalid Gemini API response structure.';
-            print('DEBUG: Invalid Gemini API response structure: $data');
-          }
-        } else {
-          throw DioException(
-            requestOptions: RequestOptions(path: fullGeminiApiUrl),
-            response: response,
-            error: 'Unexpected status: ${response.statusCode}',
-          );
-        }
-      } on DioException catch (e) {
-        retryCount++;
-        print(
-            'Retry $retryCount due to DioException: ${e.response?.statusCode} - ${e.response?.statusMessage}');
-        await Future.delayed(Duration(seconds: 2 * retryCount));
-        if (retryCount == 3) rethrow;
-      }
+    if (response.statusCode == 200 && response.data['entities'] != null) {
+      final String formattedSummary = response.data['summary'] ?? 'No summary returned';
+      
+      setState(() {
+        _generatedSummary = formattedSummary;
+        _summaryController.text = _generatedSummary;
+      });
+    } else {
+      setState(() {
+        _summaryErrorMessage = 'Unexpected response from backend.';
+      });
     }
-  } on DioException catch (e) {
-    _summaryErrorMessage =
-        'Gemini service is temporarily overloaded. Please try again later.';
-    print(
-        'DEBUG: DioException during Gemini API call: ${e.response?.statusCode} - ${e.response?.data ?? e.message}');
   } catch (e) {
-    _summaryErrorMessage = 'Error calling Gemini API: $e';
-    print('DEBUG: Generic Error calling Gemini API: $e');
-  } finally {
     setState(() {
-      _isLoadingSummary = false;
+      _summaryErrorMessage = 'Failed to connect to backend: $e';
     });
+  } finally {
+    setState(() => _isLoadingSummary = false);
   }
 }
 
 
-  // Function to save summary to Firestore
   Future<void> _saveSummary() async {
     if (_userId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -245,13 +112,9 @@ ${widget.conversationText}
       return;
     }
 
-    setState(() {
-      _isLoadingSummary = true; // Show loading while saving
-    });
+    setState(() => _isLoadingSummary = true);
 
     try {
-      // Define the Firestore collection path for private user data
-      // /artifacts/{appId}/users/{userId}/consultations
       final CollectionReference consultationsRef = _db
           .collection('artifacts')
           .doc(__app_id)
@@ -260,26 +123,21 @@ ${widget.conversationText}
           .collection('consultations');
 
       await consultationsRef.add({
-        'timestamp': FieldValue.serverTimestamp(), // Automatically get server timestamp
-        'originalText': widget.conversationText, // Store the original conversation text
-        'summary': _summaryController.text, // Store the generated/edited summary
-        'userId': _userId, // Store the user ID for reference
+        'timestamp': FieldValue.serverTimestamp(),
+        'originalText': widget.conversationText,
+        'summary': _summaryController.text,
+        'userId': _userId,
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Summary saved successfully!')),
       );
-      print('DEBUG: Summary saved to Firestore for user: $_userId');
-
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error saving summary: $e')),
       );
-      print('DEBUG: Error saving summary to Firestore: $e');
     } finally {
-      setState(() {
-        _isLoadingSummary = false; // Hide loading
-      });
+      setState(() => _isLoadingSummary = false);
     }
   }
 
@@ -291,25 +149,23 @@ ${widget.conversationText}
 
   @override
   Widget build(BuildContext context) {
-    // Using currentTheme for consistent styling
-    // Note: Some colors are hardcoded as per your provided file for exact match.
     final ThemeData currentTheme = Theme.of(context);
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Consultation Summary'),
-        backgroundColor: Colors.green, // Hardcoded as per your provided file
-        elevation: 0, // Hardcoded as per your provided file
+        backgroundColor: Colors.green,
+        elevation: 0,
       ),
-      backgroundColor: Colors.green[50], // Hardcoded as per your provided file
-      body: _isLoadingSummary && _generatedSummary == 'Generating summary...' // Only show full loading for initial summary generation
+      backgroundColor: Colors.green[50],
+      body: _isLoadingSummary && _generatedSummary == 'Generating summary...'
           ? const Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   CircularProgressIndicator(),
                   SizedBox(height: 20),
-                  Text('Generating medical summary...', style: TextStyle(fontSize: 16)), // Text style kept as per your provided file
+                  Text('Generating medical summary...', style: TextStyle(fontSize: 16)),
                 ],
               ),
             )
@@ -332,10 +188,9 @@ ${widget.conversationText}
                         style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
                       ),
                     ),
-                  
                   Text(
                     'Generated Summary:',
-                    style: TextStyle( // Text style kept as per your provided file
+                    style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
                       color: Colors.green[700],
@@ -345,12 +200,12 @@ ${widget.conversationText}
                   Container(
                     padding: const EdgeInsets.all(16.0),
                     decoration: BoxDecoration(
-                      color: Colors.white, // Hardcoded as per your provided file
+                      color: Colors.white,
                       borderRadius: BorderRadius.circular(15),
-                      border: Border.all(color: Colors.green[200]!), // Hardcoded as per your provided file
+                      border: Border.all(color: Colors.green[200]!),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.05), // Hardcoded as per your provided file
+                          color: Colors.black.withOpacity(0.05),
                           spreadRadius: 1,
                           blurRadius: 5,
                           offset: const Offset(0, 3),
@@ -359,38 +214,44 @@ ${widget.conversationText}
                     ),
                     child: TextFormField(
                       controller: _summaryController,
-                      maxLines: null, // Allows multiple lines
+                      maxLines: null,
                       keyboardType: TextInputType.multiline,
-                      decoration: const InputDecoration( // Hardcoded as per your provided file
-                        border: InputBorder.none, // Remove default border
+                      decoration: const InputDecoration(
+                        border: InputBorder.none,
                         hintText: 'Summary will appear here...',
                       ),
-                      style: TextStyle(fontSize: 16, color: Colors.blueGrey[800]), // Hardcoded as per your provided file
+                      style: TextStyle(fontSize: 16, color: Colors.blueGrey[800]),
                     ),
                   ),
                   const SizedBox(height: 30),
-
-                  // NEW BUTTON: Manage Medicines List
                   ElevatedButton.icon(
-                    onPressed: _isLoadingSummary ? null : () {
-                      // Navigate to the new MedicinesListScreen, passing the generated summary
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => MedicinesListScreen(
-                            summaryText: _summaryController.text, patientId: '', // Pass the generated/edited summary
-                          ),
-                        ),
-                      );
-                    },
+                    onPressed: _isLoadingSummary
+                        ? null
+                        : () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => MedicinesListScreen(
+                                  summaryText: _summaryController.text,
+                                  patientId: '',
+                                ),
+                              ),
+                            );
+                          },
                     icon: const Icon(Icons.medication, size: 28),
                     label: const Text(
                       'Manage Medicines List',
                       style: TextStyle(fontSize: 20),
                     ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: currentTheme.elevatedButtonTheme.style?.backgroundColor?.resolve(MaterialState.values.toSet()) ?? currentTheme.primaryColor, // Using theme for this button
-                      foregroundColor: currentTheme.elevatedButtonTheme.style?.foregroundColor?.resolve(MaterialState.values.toSet()) ?? currentTheme.colorScheme.onPrimary, // Using theme for this button
+                      backgroundColor: currentTheme.elevatedButtonTheme.style
+                              ?.backgroundColor
+                              ?.resolve(MaterialState.values.toSet()) ??
+                          currentTheme.primaryColor,
+                      foregroundColor: currentTheme.elevatedButtonTheme.style
+                              ?.foregroundColor
+                              ?.resolve(MaterialState.values.toSet()) ??
+                          currentTheme.colorScheme.onPrimary,
                       padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(30),
@@ -400,17 +261,15 @@ ${widget.conversationText}
                     ),
                   ),
                   const SizedBox(height: 20),
-
-
                   ElevatedButton.icon(
-                    onPressed: _isLoadingSummary ? null : _saveSummary, // Call _saveSummary function
+                    onPressed: _isLoadingSummary ? null : _saveSummary,
                     icon: const Icon(Icons.save, size: 28),
                     label: const Text(
                       'Save Summary',
                       style: TextStyle(fontSize: 20),
                     ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blueAccent, // Hardcoded as per your provided file
+                      backgroundColor: Colors.blueAccent,
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
                       shape: RoundedRectangleBorder(
@@ -422,16 +281,14 @@ ${widget.conversationText}
                   ),
                   const SizedBox(height: 20),
                   ElevatedButton.icon(
-                    onPressed: _isLoadingSummary ? null : () {
-                      Navigator.pop(context); // Go back to the previous screen
-                    },
+                    onPressed: _isLoadingSummary ? null : () => Navigator.pop(context),
                     icon: const Icon(Icons.arrow_back, size: 28),
                     label: const Text(
                       'Go Back',
                       style: TextStyle(fontSize: 20),
                     ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.grey, // Hardcoded as per your provided file
+                      backgroundColor: Colors.grey,
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
                       shape: RoundedRectangleBorder(
