@@ -1,20 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-<<<<<<< HEAD
-import 'package:intl/intl.dart'; // For date formatting
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
-import 'package:printing/printing.dart'; // For PDF preview and printing
-import 'package:medicare/models/medicine_prescription.dart'; // Import the medicine model
-import 'package:medicare/doctor_home_screen.dart'; // For navigation back to doctor home
-import 'dart:typed_data'; // For Uint8List
-=======
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:uuid/uuid.dart';
 import 'package:intl/intl.dart'; // Ensure intl is in your pubspec.yaml if not already
 import 'package:medicare/models/medicine_prescription.dart'; // Import your MedicinePrescription model
 import 'package:url_launcher/url_launcher.dart'; // For sharing via WhatsApp/Email
->>>>>>> 512fb51e (Updated screens, added services and widgets)
+
+// PDF generation imports
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart'; // For PDF preview and printing
+import 'dart:typed_data'; // For Uint8List
+
+// For navigation back to doctor home (if needed, otherwise remove)
+import 'package:medicare/doctor_home_screen.dart';
+
 
 const String __app_id = String.fromEnvironment('APP_ID', defaultValue: 'default-app-id');
 
@@ -265,6 +265,24 @@ class _OpdReportFinalScreenState extends State<OpdReportFinalScreen> {
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                     ),
                   ),
+                  ElevatedButton.icon(
+                    onPressed: () async {
+                      // Generate PDF and show preview
+                      final pdfBytes = await _generatePdfReport(opdReportData);
+                      if (pdfBytes != null) {
+                        Printing.sharePdf(bytes: pdfBytes, filename: 'OPD_Report_${opdReportData['patientId']}.pdf');
+                      } else {
+                        _showShareError('Failed to generate PDF for sharing.');
+                      }
+                    },
+                    icon: const Icon(Icons.picture_as_pdf, color: Colors.white),
+                    label: const Text('PDF'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.redAccent,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -283,6 +301,7 @@ class _OpdReportFinalScreenState extends State<OpdReportFinalScreen> {
     );
   }
 
+  // Helper function to generate the text content for sharing (WhatsApp/Email)
   String _generateReportText(Map<String, dynamic> reportData) {
     String medicinesText = (reportData['medicines'] as List<dynamic>)
         .map((m) =>
@@ -309,7 +328,65 @@ Diagnosis: ${reportData['diagnosis']}
 *Prescribed Medicines:*
 ${medicinesText.isNotEmpty ? medicinesText : 'No medicines prescribed.'}
 
-<<<<<<< HEAD
+Additional Notes: ${reportData['additionalNotes'].isNotEmpty ? reportData['additionalNotes'] : 'N/A'}
+""";
+  }
+
+  // New function to generate the PDF report
+  Future<Uint8List> _generatePdfReport(Map<String, dynamic> reportData) async {
+    final pdf = pw.Document();
+
+    final List<MedicinePrescription> medicines = (reportData['medicines'] as List<dynamic>)
+        .map((m) => MedicinePrescription.fromJson(m as Map<String, dynamic>))
+        .toList();
+
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4,
+        build: (pw.Context context) {
+          return pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Center(
+                child: pw.Text(
+                  'OPD Report',
+                  style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold, color: PdfColors.blue800),
+                ),
+              ),
+              pw.SizedBox(height: 20),
+              pw.Text('Report ID: ${reportData['reportId']}', style: pw.TextStyle(fontSize: 12)),
+              pw.Text('Date: ${reportData['reportDate']}', style: pw.TextStyle(fontSize: 12)),
+              pw.Divider(height: 20, thickness: 1),
+
+              // Patient Details Section
+              pw.Text('Patient Details:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+              pw.SizedBox(height: 10),
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text('Name: ${reportData['patientName'] ?? 'N/A'}'),
+                  pw.Text('Patient ID: ${reportData['patientId'] ?? 'N/A'}'),
+                  pw.Text('Age: ${reportData['patientAge'] ?? 'N/A'}'),
+                  pw.Text('Gender: ${reportData['patientGender'] ?? 'N/A'}'),
+                  pw.Text('Contact: ${reportData['patientContact'] ?? 'N/A'}'),
+                  pw.Text('Address: ${reportData['patientAddress'] ?? 'N/A'}'),
+                  pw.Text('Email: ${reportData['patientEmail'] ?? 'N/A'}'),
+                ],
+              ),
+              pw.SizedBox(height: 20),
+
+              // Chief Complaint Section
+              pw.Text('Chief Complaint:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+              pw.SizedBox(height: 10),
+              pw.Text(reportData['chiefComplaint'] ?? 'N/A'),
+              pw.SizedBox(height: 20),
+
+              // Diagnosis Section
+              pw.Text('Diagnosis:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+              pw.SizedBox(height: 10),
+              pw.Text(reportData['diagnosis'] ?? 'N/A'),
+              pw.SizedBox(height: 20),
+
               // Prescribed Medicines Section
               pw.Text('Prescribed Medicines:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
               pw.SizedBox(height: 10),
@@ -332,13 +409,18 @@ ${medicinesText.isNotEmpty ? medicinesText : 'No medicines prescribed.'}
                 ),
               pw.SizedBox(height: 20),
 
+              // Additional Notes Section
+              pw.Text('Additional Notes:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+              pw.SizedBox(height: 10),
+              pw.Text(reportData['additionalNotes'].isNotEmpty ? reportData['additionalNotes'] : 'N/A'),
+              pw.SizedBox(height: 20),
+
               // Footer
               pw.Align(
                 alignment: pw.Alignment.bottomRight,
                 child: pw.Column(
                   crossAxisAlignment: pw.CrossAxisAlignment.end,
                   children: [
-                    pw.Text('Date: ${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now())}'),
                     pw.Text('Doctor: ${_auth.currentUser?.displayName ?? _auth.currentUser?.email ?? 'Unknown'}'),
                   ],
                 ),
@@ -348,11 +430,7 @@ ${medicinesText.isNotEmpty ? medicinesText : 'No medicines prescribed.'}
         },
       ),
     );
-    return doc.save();
-=======
-Additional Notes: ${reportData['additionalNotes'].isNotEmpty ? reportData['additionalNotes'] : 'N/A'}
-""";
->>>>>>> 512fb51e (Updated screens, added services and widgets)
+    return pdf.save();
   }
 
   Future<void> _shareReportViaWhatsApp(Map<String, dynamic> reportData) async {
