@@ -187,10 +187,14 @@ class _OpdReportFinalScreenState extends State<OpdReportFinalScreen> {
         'reportDate': formattedDate, // Store formatted date for display
       };
 
+      // --- CRITICAL CHANGE HERE: Adjusting Firestore path for security rules ---
+      // Saving to artifacts/{appId}/users/{userId}/opdReports/{reportId}
       await _firestore
           .collection('artifacts')
           .doc(__app_id)
-          .collection('opdReports') // New collection for OPD reports
+          .collection('users') // Add 'users' collection
+          .doc(_userId) // Add the current doctor's userId as a document
+          .collection('opdReports') // Then 'opdReports' collection under the user
           .doc(reportId)
           .set(opdReportData);
 
@@ -242,17 +246,22 @@ class _OpdReportFinalScreenState extends State<OpdReportFinalScreen> {
               const SizedBox(height: 20),
               Text('Share this report:', style: theme.textTheme.titleMedium),
               const SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
+              // --- START: Improved Share Buttons Layout ---
+              Wrap(
+                spacing: 12.0, // Horizontal space between buttons
+                runSpacing: 12.0, // Vertical space between lines of buttons
+                alignment: WrapAlignment.center, // Center buttons if they wrap
                 children: [
                   ElevatedButton.icon(
                     onPressed: () => _shareReportViaWhatsApp(opdReportData),
-                    icon: const Icon(Icons.chat, color: Colors.white), // Changed from Icons.whatsapp to Icons.chat
+                    icon: const Icon(Icons.chat, color: Colors.white),
                     label: const Text('WhatsApp'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.green,
                       foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10), // Adjusted padding
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), // More rounded
+                      elevation: 3,
                     ),
                   ),
                   ElevatedButton.icon(
@@ -262,12 +271,13 @@ class _OpdReportFinalScreenState extends State<OpdReportFinalScreen> {
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.blue,
                       foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10), // Adjusted padding
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), // More rounded
+                      elevation: 3,
                     ),
                   ),
                   ElevatedButton.icon(
                     onPressed: () async {
-                      // Generate PDF and show preview
                       final pdfBytes = await _generatePdfReport(opdReportData);
                       if (pdfBytes != null) {
                         Printing.sharePdf(bytes: pdfBytes, filename: 'OPD_Report_${opdReportData['patientId']}.pdf');
@@ -280,11 +290,14 @@ class _OpdReportFinalScreenState extends State<OpdReportFinalScreen> {
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.redAccent,
                       foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10), // Adjusted padding
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), // More rounded
+                      elevation: 3,
                     ),
                   ),
                 ],
               ),
+              // --- END: Improved Share Buttons Layout ---
             ],
           ),
           actions: <Widget>[
@@ -347,51 +360,101 @@ Additional Notes: ${reportData['additionalNotes'].isNotEmpty ? reportData['addit
           return pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-              pw.Center(
-                child: pw.Text(
-                  'OPD Report',
-                  style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold, color: PdfColors.blue800),
+              // Hospital Header Section
+              pw.Container(
+                padding: pw.EdgeInsets.all(10),
+                decoration: pw.BoxDecoration(
+                  color: PdfColors.blueGrey50,
+                  border: pw.Border.all(color: PdfColors.blueGrey200, width: 1),
+                  borderRadius: pw.BorderRadius.circular(5),
+                ),
+                child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text(
+                      'MediCare Clinic', // Hospital Name - You can customize this
+                      style: pw.TextStyle(fontSize: 28, fontWeight: pw.FontWeight.bold, color: PdfColors.blue800),
+                    ),
+                    pw.Text(
+                      '123 Health Street, Wellness City, State 12345', // Hospital Address
+                      style: pw.TextStyle(fontSize: 12, color: PdfColors.grey700),
+                    ),
+                    pw.Text(
+                      'Phone: (123) 456-7890 | Email: info@medicare.com', // Hospital Contact
+                      style: pw.TextStyle(fontSize: 12, color: PdfColors.grey700),
+                    ),
+                  ],
                 ),
               ),
               pw.SizedBox(height: 20),
-              pw.Text('Report ID: ${reportData['reportId']}', style: pw.TextStyle(fontSize: 12)),
-              pw.Text('Date: ${reportData['reportDate']}', style: pw.TextStyle(fontSize: 12)),
-              pw.Divider(height: 20, thickness: 1),
+
+              // Report Title and Details
+              pw.Center(
+                child: pw.Text(
+                  'Outpatient Department (OPD) Report',
+                  style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold, color: PdfColors.blue700),
+                ),
+              ),
+              pw.SizedBox(height: 10),
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Text('Report ID: ${reportData['reportId']}', style: pw.TextStyle(fontSize: 11, color: PdfColors.grey800)),
+                  pw.Text('Date: ${reportData['reportDate']}', style: pw.TextStyle(fontSize: 11, color: PdfColors.grey800)),
+                ],
+              ),
+              pw.Divider(height: 20, thickness: 1.5, color: PdfColors.blueGrey300),
 
               // Patient Details Section
-              pw.Text('Patient Details:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-              pw.SizedBox(height: 10),
-              pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Text('Name: ${reportData['patientName'] ?? 'N/A'}'),
-                  pw.Text('Patient ID: ${reportData['patientId'] ?? 'N/A'}'),
-                  pw.Text('Age: ${reportData['patientAge'] ?? 'N/A'}'),
-                  pw.Text('Gender: ${reportData['patientGender'] ?? 'N/A'}'),
-                  pw.Text('Contact: ${reportData['patientContact'] ?? 'N/A'}'),
-                  pw.Text('Address: ${reportData['patientAddress'] ?? 'N/A'}'),
-                  pw.Text('Email: ${reportData['patientEmail'] ?? 'N/A'}'),
+              pw.Text('Patient Information:', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold, color: PdfColors.blue600)),
+              pw.SizedBox(height: 8),
+              pw.Table.fromTextArray(
+                cellAlignment: pw.Alignment.centerLeft,
+                cellPadding: const pw.EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                border: null, // No border for a cleaner look
+                columnWidths: {
+                  0: pw.FixedColumnWidth(100), // Label width
+                  1: pw.FlexColumnWidth(), // Value width
+                },
+                data: [
+                  ['Name:', reportData['patientName'] ?? 'N/A'],
+                  ['Patient ID:', reportData['patientId'] ?? 'N/A'],
+                  ['Age:', reportData['patientAge'] ?? 'N/A'],
+                  ['Gender:', reportData['patientGender'] ?? 'N/A'],
+                  ['Contact:', reportData['patientContact'] ?? 'N/A'],
+                  ['Address:', reportData['patientAddress'] ?? 'N/A'],
+                  ['Email:', reportData['patientEmail'] ?? 'N/A'],
                 ],
+                cellStyle: pw.TextStyle(fontSize: 11, color: PdfColors.black),
+                headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11, color: PdfColors.grey900),
               ),
               pw.SizedBox(height: 20),
 
               // Chief Complaint Section
-              pw.Text('Chief Complaint:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-              pw.SizedBox(height: 10),
-              pw.Text(reportData['chiefComplaint'] ?? 'N/A'),
+              pw.Text('Chief Complaint:', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold, color: PdfColors.blue600)),
+              pw.SizedBox(height: 8),
+              pw.Container(
+                decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey300)),
+                padding: pw.EdgeInsets.all(8),
+                child: pw.Text(reportData['chiefComplaint'] ?? 'N/A', style: pw.TextStyle(fontSize: 11)),
+              ),
               pw.SizedBox(height: 20),
 
               // Diagnosis Section
-              pw.Text('Diagnosis:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-              pw.SizedBox(height: 10),
-              pw.Text(reportData['diagnosis'] ?? 'N/A'),
+              pw.Text('Diagnosis:', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold, color: PdfColors.blue600)),
+              pw.SizedBox(height: 8),
+              pw.Container(
+                decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey300)),
+                padding: pw.EdgeInsets.all(8),
+                child: pw.Text(reportData['diagnosis'] ?? 'N/A', style: pw.TextStyle(fontSize: 11)),
+              ),
               pw.SizedBox(height: 20),
 
               // Prescribed Medicines Section
-              pw.Text('Prescribed Medicines:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-              pw.SizedBox(height: 10),
+              pw.Text('Prescribed Medicines:', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold, color: PdfColors.blue600)),
+              pw.SizedBox(height: 8),
               if (medicines.isEmpty)
-                pw.Text('No medicines prescribed.', style: pw.TextStyle(fontStyle: pw.FontStyle.italic))
+                pw.Text('No medicines prescribed.', style: pw.TextStyle(fontStyle: pw.FontStyle.italic, fontSize: 11))
               else
                 pw.Table.fromTextArray(
                   headers: ['Medicine', 'Dosage', 'Duration', 'Frequency', 'Timing'],
@@ -402,26 +465,34 @@ Additional Notes: ${reportData['additionalNotes'].isNotEmpty ? reportData['addit
                     med.frequency,
                     med.timing,
                   ]).toList(),
-                  border: pw.TableBorder.all(color: PdfColors.grey500),
-                  headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+                  border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.5),
+                  headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, color: PdfColors.white),
+                  headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey700),
                   cellAlignment: pw.Alignment.centerLeft,
                   cellPadding: const pw.EdgeInsets.all(5),
+                  cellStyle: pw.TextStyle(fontSize: 10, color: PdfColors.black),
                 ),
               pw.SizedBox(height: 20),
 
               // Additional Notes Section
-              pw.Text('Additional Notes:', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-              pw.SizedBox(height: 10),
-              pw.Text(reportData['additionalNotes'].isNotEmpty ? reportData['additionalNotes'] : 'N/A'),
-              pw.SizedBox(height: 20),
+              pw.Text('Additional Notes:', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold, color: PdfColors.blue600)),
+              pw.SizedBox(height: 8),
+              pw.Container(
+                decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey300)),
+                padding: pw.EdgeInsets.all(8),
+                child: pw.Text(reportData['additionalNotes'].isNotEmpty ? reportData['additionalNotes'] : 'N/A', style: pw.TextStyle(fontSize: 11)),
+              ),
+              pw.SizedBox(height: 40), // More space before footer
 
-              // Footer
+              // Footer (Doctor's Signature)
               pw.Align(
                 alignment: pw.Alignment.bottomRight,
                 child: pw.Column(
                   crossAxisAlignment: pw.CrossAxisAlignment.end,
                   children: [
-                    pw.Text('Doctor: ${_auth.currentUser?.displayName ?? _auth.currentUser?.email ?? 'Unknown'}'),
+                    pw.Text('_________________________', style: pw.TextStyle(fontSize: 12)),
+                    pw.Text('Doctor: ${_auth.currentUser?.displayName ?? _auth.currentUser?.email ?? 'Unknown'}', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+                    pw.Text('Signature & Stamp', style: pw.TextStyle(fontSize: 10, color: PdfColors.grey600)),
                   ],
                 ),
               ),
