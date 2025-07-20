@@ -19,7 +19,7 @@ class LanguageVoiceInputScreen extends StatefulWidget {
 
 class _LanguageVoiceInputScreenState extends State<LanguageVoiceInputScreen> {
   // Bhashini API Details (REPLACE WITH YOUR ACTUAL CREDENTIALS)
-  final String _bhashiniApiKey = '529fda3d00-836e-498b-a266-7d1ea97a667f'; // <-- Replace with your Bhashini API Key
+  final String _bhashiniApiKey = '33ad47f274-f954-4afe-83c1-b8604622ac60'; // <-- Replace with your Bhashini API Key
   final String _bhashiniUserId = 'ae98869a2a7542b1a24da628b955e51b'; // <-- Replace with your Bhashini User ID
 
   // Base URL for Bhashini Authentication API (for getting pipeline config)
@@ -82,7 +82,10 @@ class _LanguageVoiceInputScreenState extends State<LanguageVoiceInputScreen> {
     });
 
     try {
-      final Dio dio = Dio();
+      final Dio dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 120), // This is good!
+        receiveTimeout: const Duration(seconds: 120), // This is good!
+));
       final response = await dio.post(
         '$_bhashiniAuthBaseUrl/ulca/apis/v0/model/getModelsPipeline', // Corrected URL path
         options: Options(headers: {
@@ -182,7 +185,10 @@ class _LanguageVoiceInputScreenState extends State<LanguageVoiceInputScreen> {
     }
 
     try {
-      final Dio dio = Dio();
+      final Dio dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 120), // This is good!
+        receiveTimeout: const Duration(seconds: 120), // This is good!
+));
       final requestBody = jsonEncode({
           "pipelineTasks": [
             {
@@ -279,7 +285,10 @@ class _LanguageVoiceInputScreenState extends State<LanguageVoiceInputScreen> {
     }
 
     try {
-      final Dio dio = Dio();
+      final Dio dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 120), // This is good!
+        receiveTimeout: const Duration(seconds: 120), // This is good!
+));
       final requestBody = jsonEncode({
           "pipelineTasks": [
             {

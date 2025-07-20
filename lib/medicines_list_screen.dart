@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart'; // For temporary file paths
 import 'dart:io'; // For File operations
 import 'dart:math'; // For min function in debug prints
 import 'dart:async'; // For StreamSubscription
+import 'package:string_similarity/string_similarity.dart'; // For fuzzy matching medicine names
 
 // Import the next screen in the workflow
 import 'package:medicare/opd_report_final_screen.dart';
@@ -19,14 +20,14 @@ const String __app_id = String.fromEnvironment('APP_ID', defaultValue: 'default-
 
 class MedicinesListScreen extends StatefulWidget {
   final String summaryText; // This is the summary generated from the conversation
-  final String patientId; // NEW: Patient ID passed from SummaryScreen
-  final String? chiefComplaint; // NEW: Chief Complaint passed from SummaryScreen
+  final String patientId; // Patient ID passed from SummaryScreen
+  final String? chiefComplaint; // Chief Complaint passed from SummaryScreen
 
   const MedicinesListScreen({
     super.key,
     required this.summaryText,
-    required this.patientId, // Added patientId
-    this.chiefComplaint, // Added chiefComplaint
+    required this.patientId,
+    this.chiefComplaint,
   });
 
   @override
@@ -37,14 +38,16 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
   List<MedicinePrescription> _medicines = [];
   bool _isLoading = false; // General loading for API calls, data loading
   String _errorMessage = '';
-  final Dio _dio = Dio(); // Initialize Dio for API calls
+  final Dio _dio = Dio(BaseOptions(
+    connectTimeout: const Duration(seconds: 30), // Increased connect timeout
+    receiveTimeout: const Duration(seconds: 60), // Increased receive timeout
+  )); // Initialize Dio for API calls
 
-  // Hardcoded Gemini API Details
-  final String _geminiApiKey = 'AIzaSyCXmcg_aOEwg38airIbs14C0SqZK6b_UTo';
-  final String _geminiModel = 'gemini-1.5-flash'; // Consistent with SummaryScreen
-  final String _geminiApiBaseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/';
+  // Backend API Details for Custom ML Model
+  // IMPORTANT: For Android Emulator, use 10.0.2.2. For iOS Simulator/Desktop, use localhost.
+  final String _backendApiBaseUrl = 'http://192.168.29.68:8000'; // For Physical Device // For Android Emulator
 
-  // Bhashini API Details
+  // Bhashini API Details (remains for ASR)
   final String _bhashiniApiKey = '529fda3d00-836e-498b-a266-7d1ea97a667f'; // Bhashini API Key
   final String _bhashiniUserId = 'ae98869a2a7542b1a24da628b955e51b'; // Bhashini User ID
   final String _bhashiniAuthBaseUrl = 'https://meity-auth.ulcacontrib.org';
@@ -61,20 +64,18 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
   // Maps to hold TextEditingControllers for each medicine's fields
   final Map<String, Map<String, TextEditingController>> _fieldControllers = {};
 
-  List<String> _availableMedicineNames = []; // List of medicine names from CSV for suggestions
+  List<String> _availableMedicineNames = []; // List of medicine names from DataLoader for suggestions
 
   @override
   void initState() {
     super.initState();
     _initializeBhashiniPipeline(); // Initialize Bhashini first
-    // Use addPostFrameCallback to ensure context is fully built before accessing DataLoader
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final dataLoader = Provider.of<DataLoader>(context, listen: false);
-      // Listen to DataLoader changes only if not already loaded
       if (!dataLoader.isLoaded) {
         dataLoader.addListener(_handleDataLoaderChange);
+        dataLoader.loadData();
       } else {
-        // If already loaded, proceed with initial medicine extraction
         _handleInitialMedicineExtraction();
       }
     });
@@ -83,52 +84,42 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
   @override
   void dispose() {
     final dataLoader = Provider.of<DataLoader>(context, listen: false);
-    dataLoader.removeListener(_handleDataLoaderChange); // Remove listener on dispose
+    dataLoader.removeListener(_handleDataLoaderChange);
 
     _audioLevelSubscription?.cancel();
     _audioRecorder.dispose();
 
-    // Dispose all managed controllers
     _fieldControllers.forEach((medicineId, fieldMap) {
       fieldMap.forEach((field, controller) {
         controller.dispose();
       });
     });
-    _fieldControllers.clear(); // Clear the map after disposing all controllers
+    _fieldControllers.clear();
 
     super.dispose();
   }
 
-  // Helper to get or create a TextEditingController for a specific field
   TextEditingController _getOrCreateController(String medicineId, String field, String initialText) {
-    // Ensure the map for this medicineId exists
     _fieldControllers.putIfAbsent(medicineId, () => {});
-
     if (!_fieldControllers[medicineId]!.containsKey(field)) {
       final controller = TextEditingController(text: initialText);
       _fieldControllers[medicineId]![field] = controller;
-
-      // Add listener to update the model when text changes
       controller.addListener(() {
-        if (!mounted) return; // Guard against disposed widget
+        if (!mounted) return;
         final index = _medicines.indexWhere((m) => m.id == medicineId);
         if (index != -1) {
-          // Only update if the text actually changed to prevent unnecessary rebuilds
           if (controller.text != _medicines[index].getField(field)) {
-             setState(() { // setState is needed here to reflect changes in UI
-               _medicines[index].setField(field, controller.text);
-             });
+              setState(() {
+                _medicines[index].setField(field, controller.text);
+              });
           }
         }
       });
     } else {
-      // If controller already exists, ensure its text is synced with the model
       final controller = _fieldControllers[medicineId]![field]!;
-      // Only update if different, to avoid cursor jumping, and ensure it's not disposed
       if (controller.text != initialText) {
         try {
           controller.text = initialText;
-          // Move cursor to end if text was programmatically updated
           controller.selection = TextSelection.fromPosition(TextPosition(offset: controller.text.length));
         } catch (e) {
           print('Error updating controller for $medicineId, field $field: $e');
@@ -138,12 +129,11 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
     return _fieldControllers[medicineId]![field]!;
   }
 
-  // Listener for DataLoader changes
   void _handleDataLoaderChange() {
     final dataLoader = Provider.of<DataLoader>(context, listen: false);
     if (dataLoader.isLoaded) {
       _handleInitialMedicineExtraction();
-      dataLoader.removeListener(_handleDataLoaderChange); // Remove listener once loaded
+      dataLoader.removeListener(_handleDataLoaderChange);
     } else if (dataLoader.loadError != null) {
       if (mounted) {
         setState(() {
@@ -151,29 +141,26 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
           _isLoading = false;
         });
       }
-      dataLoader.removeListener(_handleDataLoaderChange); // Remove listener on error
+      dataLoader.removeListener(_handleDataLoaderChange);
     }
   }
 
-  // Handles initial medicine extraction from summary, only if conditions met
   void _handleInitialMedicineExtraction() {
-    // Load medicine names from CSV via DataLoader
-    // This is now called after DataLoader confirms data is loaded
     final dataLoader = Provider.of<DataLoader>(context, listen: false);
-    final medicinesFromLoader = dataLoader.getLoadedData('medicines');
-    if (medicinesFromLoader != null && medicinesFromLoader.isNotEmpty) {
+    final medicinesFromLoader = dataLoader.medicineNames;
+    if (medicinesFromLoader.isNotEmpty) {
       setState(() {
-        _availableMedicineNames = medicinesFromLoader.map((e) => e['name'].toString()).toList();
-        _errorMessage = ''; // Clear error if successful
+        _availableMedicineNames = medicinesFromLoader;
+        _errorMessage = '';
       });
     } else {
       setState(() {
-        _errorMessage = 'No medicines found in local assets. Please ensure medicines.csv is correctly bundled.';
+        _errorMessage = 'No medicine names found in local assets. Please ensure medicine_combined.json is correctly bundled and contains "name" fields.';
       });
     }
 
     if (widget.summaryText.isNotEmpty && widget.summaryText != 'Generating summary...') {
-      _extractMedicinesFromSummary();
+      _extractMedicinesFromBackend(widget.summaryText);
     } else {
       if (mounted) {
         setState(() {
@@ -185,7 +172,6 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
   }
 
   // --- Bhashini API Functions ---
-
   Future<void> _initializeBhashiniPipeline() async {
     if (!mounted) return; // Guard
     setState(() {
@@ -199,10 +185,11 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
     try {
       final Dio dio = Dio();
       final response = await dio.post(
+        // Corrected Bhashini API endpoint
         '$_bhashiniAuthBaseUrl/ulca/apis/v0/model/getModelsPipeline',
         options: Options(headers: {
           'Content-Type': 'application/json',
-          'ulcaApiKey': _bhashiniApiKey,
+          'ulcaApiKey': _bhashiniApiKey, // Corrected header for Bhashini v0
           'userID': _bhashiniUserId,
         }),
         data: jsonEncode({
@@ -232,7 +219,7 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
           }
 
           if (_bhashiniInferenceBaseUrl == null || _bhashiniInferenceApiKey == null) {
-             _errorMessage = 'Failed to get Bhashini inference API details. Check Bhashini configuration.';
+              _errorMessage = 'Failed to get Bhashini inference API details. Check Bhashini configuration.';
           }
         } else {
           _errorMessage = 'Invalid pipeline configuration response (empty data).';
@@ -240,9 +227,12 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
       } else {
         _errorMessage = 'Failed to fetch Bhashini pipeline config: ${response.statusCode} - ${response.data}';
       }
+    } on DioException catch (e) {
+      _errorMessage = 'Error initializing Bhashini pipeline: ${e.response?.statusCode} - ${e.response?.data ?? e.message}';
+      print('DioError initializing Bhashini: ${e.response?.statusCode} - ${e.response?.data ?? e.message}');
     } catch (e) {
       _errorMessage = 'Error initializing Bhashini pipeline: $e';
-      print('Error initializing Bhashini pipeline: $e');
+      print('Unexpected error initializing Bhashini: $e');
     } finally {
       if (mounted) { // Ensure widget is still mounted before calling setState
         setState(() {
@@ -281,8 +271,6 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
     return null;
   }
 
-  // Performs Speech-to-Text (ASR) using Bhashini Inference API.
-  // Returns transcribed text.
   Future<String?> _performASR(String audioBase64, String sourceLanguageCode) async {
     if (_bhashiniInferenceBaseUrl == null || _bhashiniInferenceApiKey == null) {
       if (mounted) { // Guard setState
@@ -314,7 +302,7 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
               }
             }
           ],
-          "inputData": {
+          "inputData": { // Corrected input key for Bhashini v0
             "audio": [
               {
                 "audioContent": audioBase64
@@ -329,7 +317,7 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
 
       final response = await dio.post(
         _bhashiniInferenceBaseUrl!,
-        options: Options(headers: {'Content-Type': 'application/json', 'Authorization': _bhashiniInferenceApiKey!,}),
+        options: Options(headers: {'Content-Type': 'application/json', 'Authorization': _bhashiniInferenceApiKey!,}), // Authorization header for inference
         data: requestBody,
       );
 
@@ -375,140 +363,72 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
     }
   }
 
-  // Function to call Gemini API for medicine extraction from the GENERATED SUMMARY
-  Future<void> _extractMedicinesFromSummary() async {
-    if (!mounted) return; // Guard
+
+  // --- Backend API Call for Extraction ---
+  Future<void> _extractMedicinesFromBackend(String text, {int retryCount = 0}) async {
+    if (!mounted) return;
     setState(() {
       _isLoading = true;
       _errorMessage = '';
     });
 
     try {
-      final String prompt = """
-      Extract medicine prescriptions from the following patient summary. For each medicine, identify its name, dosage, duration, frequency, and timing (e.g., 'before food', 'after food', 'at night', 'morning', 'evening', 'bedtime'). If a detail is not explicitly mentioned or is unclear, use 'N/A' for that specific field.
-      If no medicines are mentioned, return an empty JSON array `[]`.
-
-      Provide the output as a JSON array of objects. Each object should have the following properties: 'name', 'dosage', 'duration', 'frequency', 'timing'.
-
-      Example JSON structure:
-      [
-        {
-          "name": "Paracetamol",
-          "dosage": "500mg",
-          "duration": "5 days",
-          "frequency": "twice daily",
-          "timing": "after food"
-        },
-        {
-          "name": "Amoxicillin",
-          "dosage": "250mg",
-          "duration": "7 days",
-          "frequency": "three times a day",
-          "timing": "before food"
-        }
-      ]
-
-      Summary:
-      ${widget.summaryText}
-      """;
-
-      List<Map<String, dynamic>> chatHistory = [];
-      chatHistory.add({ "role": "user", "parts": [{ "text": prompt }] });
-      
-      final Map<String, dynamic> payload = {
-          "contents": chatHistory,
-          "generationConfig": {
-              "responseMimeType": "application/json",
-              "responseSchema": {
-                  "type": "ARRAY",
-                  "items": {
-                      "type": "OBJECT",
-                      "properties": {
-                          "name": { "type": "STRING" },
-                          "dosage": { "type": "STRING" },
-                          "duration": { "type": "STRING" },
-                          "frequency": { "type": "STRING" },
-                          "timing": { "type": "STRING" }
-                      },
-                      "propertyOrdering": ["name", "dosage", "duration", "frequency", "timing"]
-                  }
-              }
-          }
-      };
-
-      final fullGeminiApiUrl = '$_geminiApiBaseUrl$_geminiModel:generateContent?key=$_geminiApiKey';
-
-      print('DEBUG: Gemini Medicines Request URL: $fullGeminiApiUrl');
-      print('DEBUG: Gemini Medicines Request Body: ${jsonEncode(payload)}');
-
       final response = await _dio.post(
-        fullGeminiApiUrl,
-        data: json.encode(payload),
+        '$_backendApiBaseUrl/extract_medicines',
+        data: jsonEncode({'text': text}),
         options: Options(headers: {'Content-Type': 'application/json'}),
       );
-      
+
       if (response.statusCode == 200) {
-        final result = response.data;
-        print('DEBUG: Gemini Medicines Response Data: $result');
-        if (result['candidates'] != null && result['candidates'].length > 0 &&
-            result['candidates'][0]['content'] != null && result['candidates'][0]['content']['parts'] != null &&
-            result['candidates'][0]['content']['parts'].length > 0) {
-          final jsonString = result['candidates'][0]['content']['parts'][0]['text'];
-          print('Gemini API Raw Response: $jsonString');
-
-          final List<dynamic> jsonList = json.decode(jsonString);
-          
-          if (mounted) { // Check mounted before setState
-            setState(() {
-              _medicines.addAll(jsonList.map((item) {
-                final newMedicine = MedicinePrescription.fromJson({
-                  ...item,
-                  'id': DateTime.now().microsecondsSinceEpoch.toString(), // Using microseconds for higher uniqueness
-                });
-                // Initialize controllers for the new medicine
-                _getOrCreateController(newMedicine.id, 'name', newMedicine.name);
-                _getOrCreateController(newMedicine.id, 'dosage', newMedicine.dosage);
-                _getOrCreateController(newMedicine.id, 'duration', newMedicine.duration);
-                _getOrCreateController(newMedicine.id, 'frequency', newMedicine.frequency);
-                _getOrCreateController(newMedicine.id, 'timing', newMedicine.timing);
-                return newMedicine;
-              }).toList());
-            });
-          }
-          
-          if (_medicines.isEmpty && mounted) { // Check mounted before setting error message
-            _errorMessage = 'No medicines extracted from summary. You can add them manually or use voice input.';
-          }
-
-        } else {
-          if (mounted) { // Check mounted before setting error message
-            setState(() {
-              _errorMessage = 'Failed to extract medicines. Unexpected API response structure.';
-            });
-          }
-          print('Gemini API Error: Unexpected response structure or no candidates.');
-        }
-      } else {
-        if (mounted) { // Check mounted before setting error message
+        final List<dynamic> jsonList = response.data;
+        if (mounted) {
           setState(() {
-            _errorMessage = 'Failed to extract medicines. Status: ${response.statusCode} - ${response.statusMessage}';
-        });
+            _medicines.addAll(jsonList.map((item) {
+              final newMedicine = MedicinePrescription.fromJson({
+                ...item,
+                'id': DateTime.now().microsecondsSinceEpoch.toString(),
+              });
+              _getOrCreateController(newMedicine.id, 'name', newMedicine.name);
+              _getOrCreateController(newMedicine.id, 'dosage', newMedicine.dosage);
+              _getOrCreateController(newMedicine.id, 'duration', newMedicine.duration);
+              _getOrCreateController(newMedicine.id, 'frequency', newMedicine.frequency);
+              _getOrCreateController(newMedicine.id, 'timing', newMedicine.timing);
+              return newMedicine;
+            }).toList());
+          });
         }
-        print('Gemini API Error: Status ${response.statusCode} - ${response.statusMessage}');
+        if (_medicines.isEmpty && mounted) {
+          _errorMessage = 'No medicines extracted from summary. You can add them manually or use voice input.';
+        }
+      } else if (response.statusCode == 503 && retryCount < 3) {
+        print('Backend returned 503. Retrying in 2 seconds (Retry ${retryCount + 1})...');
+        await Future.delayed(const Duration(seconds: 2));
+        return _extractMedicinesFromBackend(text, retryCount: retryCount + 1);
+      } else {
+        if (mounted) {
+          setState(() {
+            _errorMessage = 'Failed to extract medicines from backend. Status: ${response.statusCode} - ${response.statusMessage}';
+          });
+        }
+        print('Backend Error: Status ${response.statusCode} - ${response.statusMessage}');
       }
-
     } on DioException catch (e) {
-      if (mounted) { // Check mounted before setting error message
-        _errorMessage = 'Error communicating with AI: ${e.response?.statusCode} - ${e.response?.data ?? e.message}';
+      if (e.response?.statusCode == 503 && retryCount < 3) {
+        print('DioException (503) during backend call. Retrying in 2 seconds (Retry ${retryCount + 1})...');
+        await Future.delayed(const Duration(seconds: 2));
+        return _extractMedicinesFromBackend(text, retryCount: retryCount + 1);
       }
-      print('DioException during Gemini API call: ${e.response?.statusCode} - ${e.response?.data ?? e.message}');
+      if (mounted) {
+        _errorMessage = 'Error communicating with backend: ${e.response?.statusCode} - ${e.response?.data ?? e.message}';
+      }
+      print('DioException during backend call: ${e.response?.statusCode} - ${e.response?.data ?? e.message}');
     } catch (e) {
-      if (mounted) { // Check mounted before setting error message
+      if (mounted) {
         _errorMessage = 'An unexpected error occurred: $e';
       }
       print('Unexpected Error extracting medicines: $e');
     } finally {
-      if (mounted) { // Ensure widget is still mounted before calling setState
+      if (mounted) {
         setState(() {
           _isLoading = false;
         });
@@ -516,194 +436,117 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
     }
   }
 
-  // NEW: Function to call Gemini API for comprehensive medicine extraction from voice input
-  Future<List<MedicinePrescription>?> _extractMedicinesFromVoiceInput(String voiceInputText) async {
+  // --- Backend API Call for Comprehensive Voice Input Extraction ---
+  Future<List<MedicinePrescription>?> _extractMedicinesFromVoiceInputBackend(String voiceInputText, {int retryCount = 0}) async {
     if (voiceInputText.trim().isEmpty) return [];
 
     try {
-      final String prompt = """
-      You are a highly accurate medical transcription and prescription parsing assistant.
-      Your task is to extract all medicine prescriptions from the given natural language input.
-      For each medicine, identify its name, dosage, duration, frequency, and timing (e.g., 'before food', 'after food', 'at night', 'morning', 'evening', 'bedtime').
-
-      If a detail is not explicitly mentioned or is unclear for a specific medicine, use 'N/A' for that specific field.
-      If no medicines are mentioned, return an empty JSON array `[]`.
-
-      Provide the output as a JSON array of objects. Each object must strictly adhere to the following structure:
-      {
-        "name": "STRING",
-        "dosage": "STRING",
-        "duration": "STRING",
-        "frequency": "STRING",
-        "timing": "STRING"
-      }
-
-      Example Input:
-      "The patient needs Paracetamol 650 mg, twice daily for 5 days after food. Also, prescribe Ibuprofen 200mg once a day for 3 days before food."
-
-      Example Output:
-      [
-        {
-          "name": "Paracetamol",
-          "dosage": "650 mg",
-          "duration": "5 days",
-          "frequency": "twice daily",
-          "timing": "after food"
-        },
-        {
-          "name": "Ibuprofen",
-          "dosage": "200mg",
-          "duration": "3 days",
-          "frequency": "once a day",
-          "timing": "before food"
-        }
-      ]
-
-      Now, extract medicines from the following input:
-      $voiceInputText
-      """;
-
-      List<Map<String, dynamic>> chatHistory = [];
-      chatHistory.add({ "role": "user", "parts": [{ "text": prompt }] });
-      
-      final Map<String, dynamic> payload = {
-          "contents": chatHistory,
-          "generationConfig": {
-              "responseMimeType": "application/json",
-              "responseSchema": {
-                  "type": "ARRAY",
-                  "items": {
-                      "type": "OBJECT",
-                      "properties": {
-                          "name": { "type": "STRING" },
-                          "dosage": { "type": "STRING" },
-                          "duration": { "type": "STRING" },
-                          "frequency": { "type": "STRING" },
-                          "timing": { "type": "STRING" }
-                      },
-                      "propertyOrdering": ["name", "dosage", "duration", "frequency", "timing"]
-                  }
-              }
-          }
-      };
-
-      final fullGeminiApiUrl = '$_geminiApiBaseUrl$_geminiModel:generateContent?key=$_geminiApiKey';
-
-      print('DEBUG: Gemini Comprehensive Extraction Request URL: $fullGeminiApiUrl');
-      print('DEBUG: Gemini Comprehensive Extraction Request Body: ${jsonEncode(payload)}');
-
       final response = await _dio.post(
-        fullGeminiApiUrl,
-        data: json.encode(payload),
+        '$_backendApiBaseUrl/extract_medicines',
+        data: jsonEncode({'text': voiceInputText}),
         options: Options(headers: {'Content-Type': 'application/json'}),
       );
-      
-      if (response.statusCode == 200) {
-        final result = response.data;
-        print('DEBUG: Gemini Comprehensive Extraction Response Data: $result');
-        if (result['candidates'] != null && result['candidates'].length > 0 &&
-            result['candidates'][0]['content'] != null && result['candidates'][0]['content']['parts'] != null &&
-            result['candidates'][0]['content']['parts'].length > 0) {
-          final jsonString = result['candidates'][0]['content']['parts'][0]['text'];
-          print('Gemini API Raw Response: $jsonString');
 
-          final List<dynamic> jsonList = json.decode(jsonString);
-          return jsonList.map((item) => MedicinePrescription.fromJson(item)).toList();
+      if (response.statusCode == 200) {
+        final List<dynamic> jsonList = response.data;
+        return jsonList.map((item) => MedicinePrescription.fromJson(item)).toList();
+      } else if (response.statusCode == 503 && retryCount < 3) {
+        print('Backend returned 503. Retrying in 2 seconds (Retry ${retryCount + 1})...');
+        await Future.delayed(const Duration(seconds: 2));
+        return _extractMedicinesFromVoiceInputBackend(voiceInputText, retryCount: retryCount + 1);
+      } else {
+        if (mounted) {
+          _errorMessage = 'Failed to extract medicines from voice input via backend. Status: ${response.statusCode} - ${response.statusMessage}';
         }
+        print('Backend Error: Status ${response.statusCode} - ${response.statusMessage}');
+        return [];
       }
-      return []; // Return empty list on error or invalid response
     } on DioException catch (e) {
-      if (mounted) { // Guard setState
-        _errorMessage = 'Error extracting medicines from voice input: ${e.response?.statusCode} - ${e.response?.data ?? e.message}';
+      if (e.response?.statusCode == 503 && retryCount < 3) {
+        print('DioException (503) during voice extraction backend call. Retrying in 2 seconds (Retry ${retryCount + 1})...');
+        await Future.delayed(const Duration(seconds: 2));
+        return _extractMedicinesFromVoiceInputBackend(voiceInputText, retryCount: retryCount + 1);
       }
-      print('DioException during comprehensive extraction: ${e.response?.statusCode} - ${e.response?.data ?? e.message}');
+      if (mounted) {
+        _errorMessage = 'Error communicating with backend for voice input: ${e.response?.statusCode} - ${e.response?.data ?? e.message}';
+      }
+      print('DioException during voice extraction backend call: ${e.response?.statusCode} - ${e.response?.data ?? e.message}');
       return [];
     } catch (e) {
-      if (mounted) { // Guard setState
-        _errorMessage = 'An unexpected error occurred during comprehensive extraction: $e';
+      if (mounted) {
+        _errorMessage = 'An unexpected error occurred during voice input extraction: $e';
       }
-      print('Unexpected Error during comprehensive extraction: $e');
+      print('Unexpected Error during voice input extraction: $e');
       return [];
     }
   }
 
-  // Function to call Gemini API for medicine name suggestion/correction
-  // Now takes the current patient summary for context
-  Future<String> _getMedicineSuggestion(String input, String patientSummary) async {
-    if (input.trim().isEmpty) return 'N/A'; // Return N/A for empty input
-
-    final dataLoader = Provider.of<DataLoader>(context, listen: false);
-    final List<String> availableMedicines = dataLoader.medicineNames;
-
-    // Combined prompt for Gemini to handle local CSV, global knowledge,
-    // phonetic similarity, and symptom relevance.
-    final String combinedPrompt = """
-    The user is trying to input a medicine name. The input provided is: "$input".
-    This input might be a misspelled word, a phonetic transcription from speech-to-text, or a partial name.
-
-    Here is a list of known medicine names (CSV data):
-    ${availableMedicines.isEmpty ? 'No local medicine data available.' : availableMedicines.join(', ')}
-
-    Here is a summary of the patient's symptoms/condition:
-    ${patientSummary.isEmpty || patientSummary == 'Generating summary...' ? 'No patient summary available.' : patientSummary}
-
-    Based on the input, the known medicine names, and the patient's symptoms, perform the following steps:
-    1.  **Prioritize:** Find the closest matching medicine name from the 'known medicine names' list, considering phonetic similarity and common misspellings.
-    2.  **Contextualize:** If multiple close matches exist, or if the best match is ambiguous, consider which medicine would be most relevant or commonly prescribed for the patient's symptoms/condition.
-    3.  **Global Check:** If no very strong and relevant match is found in the 'known medicine names' list, then use your general medical knowledge to determine if "$input" (or a very close phonetic variant) is a recognized medicine name in the global market.
-
-    Your response should be *only* the best suggested medicine name. If, after all considerations (local list, symptoms, global knowledge, phonetic similarity), you cannot confidently identify a valid medicine name, return "N/A".
-
-    Examples:
-    Input: "porocetomol", Symptoms: "fever, headache" -> Output: "Paracetamol"
-    Input: "azithromicin", Symptoms: "bacterial infection" -> Output: "Azithromycin"
-    Input: "lipitor", Symptoms: "high cholesterol" -> Output: "Atorvastatin" (if Lipitor is brand name for Atorvastatin and Atorvastatin is in CSV or globally known)
-    Input: "xyz-drug", Symptoms: "cough" -> Output: "N/A"
-    Input: "i see through my sin", Symptoms: "sore throat, cough" -> Output: "Azithromycin" (inferring from phonetic similarity and symptoms)
-    """;
-
-    List<Map<String, dynamic>> chatHistory = [];
-    chatHistory.add({ "role": "user", "parts": [{ "text": combinedPrompt }] });
-    
-    final Map<String, dynamic> payload = { "contents": chatHistory };
-    final fullGeminiApiUrl = '$_geminiApiBaseUrl$_geminiModel:generateContent?key=$_geminiApiKey';
-
-    print('DEBUG: Gemini Suggestion Request URL: $fullGeminiApiUrl');
-    print('DEBUG: Gemini Suggestion Request Body (truncated to 500 chars): ${jsonEncode(payload).substring(0, min(jsonEncode(payload).length, 500))}...');
+  // --- Backend API Call for Medicine Name Suggestion ---
+  Future<String> _getMedicineSuggestionFromBackend(String input, String patientSummary, {int retryCount = 0}) async {
+    if (input.trim().isEmpty) return 'N/A';
 
     try {
       final response = await _dio.post(
-        fullGeminiApiUrl,
-        data: json.encode(payload),
+        '$_backendApiBaseUrl/suggest_medicine',
+        data: jsonEncode({
+          'input_text': input,
+          'patient_summary': patientSummary,
+        }),
         options: Options(headers: {'Content-Type': 'application/json'}),
       );
-      
+
       if (response.statusCode == 200) {
         final result = response.data;
-        print('DEBUG: Gemini Suggestion Response Data: $result');
-        if (result['candidates'] != null && result['candidates'].length > 0 &&
-            result['candidates'][0]['content'] != null && result['candidates'][0]['content']['parts'] != null &&
-            result['candidates'][0]['content']['parts'].length > 0) {
-          return result['candidates'][0]['content']['parts'][0]['text'].trim();
-        }
+        return result['suggestion']?.toString() ?? 'N/A';
+      } else if (response.statusCode == 503 && retryCount < 3) {
+        print('Backend returned 503. Retrying suggestion in 2 seconds (Retry ${retryCount + 1})...');
+        await Future.delayed(const Duration(seconds: 2));
+        return _getMedicineSuggestionFromBackend(input, patientSummary, retryCount: retryCount + 1);
+      } else {
+        print('Backend Error for suggestion: Status ${response.statusCode} - ${response.statusMessage}');
+        return 'N/A';
       }
-      return 'N/A'; // Fallback if no valid response or error
     } on DioException catch (e) {
-      print('Error getting medicine suggestion: ${e.response?.statusCode} - ${e.response?.data ?? e.message}');
-      return 'N/A'; // Fallback on error
+      if (e.response?.statusCode == 503 && retryCount < 3) {
+        print('DioException (503) during suggestion backend call. Retrying in 2 seconds (Retry ${retryCount + 1})...');
+        await Future.delayed(const Duration(seconds: 2));
+        return _getMedicineSuggestionFromBackend(input, patientSummary, retryCount: retryCount + 1);
+      }
+      print('Error getting medicine suggestion from backend: ${e.response?.statusCode} - ${e.response?.data ?? e.message}');
+      return 'N/A';
     } catch (e) {
       print('Unexpected Error getting medicine suggestion: $e');
-      return 'N/A'; // Fallback on error
+      return 'N/A';
     }
   }
 
+  // --- Send Feedback to Backend ---
+  Future<void> _sendFeedbackToBackend(String originalText, List<MedicinePrescription> correctedMedicines) async {
+    try {
+      final payload = {
+        'original_text': originalText,
+        'corrected_medicines': correctedMedicines.map((m) => m.toJson()).toList(),
+      };
+      await _dio.post(
+        '$_backendApiBaseUrl/feedback_extraction',
+        data: jsonEncode(payload),
+        options: Options(headers: {'Content-Type': 'application/json'}),
+      );
+      print('DEBUG: Feedback sent to backend successfully.');
+    } on DioException catch (e) {
+      print('ERROR: Failed to send feedback to backend: ${e.response?.statusCode} - ${e.response?.data ?? e.message}');
+    } catch (e) {
+      print('ERROR: Unexpected error sending feedback: $e');
+    }
+  }
+
+
   // Function to add a new empty medicine prescription to the list
   void _addNewMedicine() {
-    if (!mounted) return; // Guard
+    if (!mounted) return;
     setState(() {
       final newMedicine = MedicinePrescription.empty();
       _medicines.add(newMedicine);
-      // Initialize controllers for the newly added medicine
       _getOrCreateController(newMedicine.id, 'name', newMedicine.name);
       _getOrCreateController(newMedicine.id, 'dosage', newMedicine.dosage);
       _getOrCreateController(newMedicine.id, 'duration', newMedicine.duration);
@@ -714,56 +557,65 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
 
   // Function to remove a medicine prescription from the list
   void _removeMedicine(String id) {
-    if (!mounted) return; // Guard
-    
-    // Dispose controllers associated with the removed medicine BEFORE removing from list
+    if (!mounted) return;
     _fieldControllers[id]?.forEach((field, controller) {
       controller.dispose();
     });
-    _fieldControllers.remove(id); // Remove the entry from the map
-
+    _fieldControllers.remove(id);
     setState(() {
       _medicines.removeWhere((medicine) => medicine.id == id);
     });
   }
 
-  // Function to save/confirm the medicines list (for demonstration)
-  void _saveMedicines() {
-    // In a real application, you would send this _medicines list to a backend
-    // or save it to a database (e.g., Firestore).
+  // Function to save/confirm the medicines list
+  void _saveMedicines() async {
     print('Saving medicines:');
     for (var medicine in _medicines) {
       print('  - ${medicine.toJson()}');
     }
-    if (mounted) { // Check mounted before showing SnackBar
+    if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Medicines list saved! (Check console for details)')),
       );
     }
+
+    // Send the current summary and the final (corrected) medicines list as feedback
+    await _sendFeedbackToBackend(widget.summaryText, _medicines);
+
+    // Navigate to the next screen (OPDReportFinalScreen)
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => OpdReportFinalScreen(
+          patientId: widget.patientId,
+          chiefComplaint: widget.chiefComplaint,
+          summaryText: widget.summaryText,
+          medicines: _medicines,
+        ),
+      ),
+    );
   }
 
   // --- Voice Input Dialog (for individual fields) ---
-  // This dialog now returns a String? result
   Future<String?> _showVoiceInputDialog({
     required String initialText,
     required bool isMedicineNameField,
   }) async {
-    String currentTranscribedText = initialText; // Initialize with the field's current text
+    String currentTranscribedText = initialText;
     String suggestedMedicine = '';
     bool isDialogRecording = false;
     bool isSuggesting = false;
     String dialogError = '';
-    double dialogAudioLevel = 0.0; // LOCAL variable for audio level in dialog
-
+    double dialogAudioLevel = 0.0;
     TextEditingController dialogInputController = TextEditingController(text: initialText);
 
-    final result = await showDialog<String>( // Dialog now returns String?
+    final result = await showDialog<String>(
       context: context,
-      barrierDismissible: false, // User must interact with buttons
+      barrierDismissible: false,
       builder: (BuildContext context) {
         final ThemeData currentTheme = Theme.of(context);
         return StatefulBuilder(
-          builder: (context, setDialogState) {
+          builder: (BuildContext context, StateSetter setDialogState) {
             return AlertDialog(
               backgroundColor: currentTheme.cardTheme.color,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
@@ -789,25 +641,24 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                           return;
                         }
                         if (await _audioRecorder.isRecording()) {
-                          // Stop recording
                           await _audioLevelSubscription?.cancel();
                           _audioLevelSubscription = null;
                           String? path = await _audioRecorder.stop();
                           setDialogState(() {
                             isDialogRecording = false;
-                            dialogAudioLevel = 0.0; // Reset local audio level
+                            dialogAudioLevel = 0.0;
                             currentTranscribedText = 'Processing...';
                           });
                           if (path != null) {
                             File audioFile = File(path);
                             List<int> audioBytes = await audioFile.readAsBytes();
-                            String audioBase64 = base64Encode(audioBytes); // Correct variable name
-                            final transcribed = await _performASR(audioBase64, 'en'); // Corrected variable usage
+                            String audioBase64 = base64Encode(audioBytes);
+                            final transcribed = await _performASR(audioBase64, 'en');
                             setDialogState(() {
                               currentTranscribedText = transcribed ?? 'Failed to transcribe.';
                               dialogError = transcribed == null ? 'Failed to transcribe audio.' : '';
-                              dialogInputController.text = currentTranscribedText; // Update dialog's text field
-                              dialogInputController.selection = TextSelection.fromPosition(TextPosition(offset: dialogInputController.text.length)); // Move cursor to end
+                              dialogInputController.text = currentTranscribedText;
+                              dialogInputController.selection = TextSelection.fromPosition(TextPosition(offset: dialogInputController.text.length));
                             });
                           } else {
                             setDialogState(() {
@@ -816,18 +667,17 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                             });
                           }
                         } else {
-                          // Start recording
                           setDialogState(() {
                             isDialogRecording = true;
                             currentTranscribedText = 'Listening...';
                             dialogError = '';
-                            dialogInputController.text = ''; // Clear previous text
+                            dialogInputController.text = '';
                           });
                           Directory tempDir = await getTemporaryDirectory();
                           _audioFilePath = '${tempDir.path}/temp_audio_field.wav';
                           _audioLevelSubscription = _audioRecorder.onAmplitudeChanged(const Duration(milliseconds: 100)).listen((amp) {
                             setDialogState(() {
-                              dialogAudioLevel = amp.current; // Update local audio level
+                              dialogAudioLevel = amp.current;
                             });
                           });
                           await _audioRecorder.start(
@@ -845,20 +695,19 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                       ),
                     ),
                     const SizedBox(height: 10),
-                    // Display audio level if recording
                     if (isDialogRecording)
                       Text(
-                        'Audio Level: ${dialogAudioLevel.toStringAsFixed(2)} dB', // Use local dialogAudioLevel
+                        'Audio Level: ${dialogAudioLevel.toStringAsFixed(2)} dB',
                         textAlign: TextAlign.center,
                         style: currentTheme.textTheme.bodySmall,
                       ),
                     const SizedBox(height: 10),
                     TextField(
-                      controller: dialogInputController, // This is the controller for the dialog's input
+                      controller: dialogInputController,
                       onChanged: (value) {
                         setDialogState(() {
-                          currentTranscribedText = value; // Keep transcribed text synced with manual edits
-                          suggestedMedicine = ''; // Clear suggestion if user starts typing
+                          currentTranscribedText = value;
+                          suggestedMedicine = '';
                           isSuggesting = false;
                         });
                       },
@@ -876,7 +725,6 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                         dialogError,
                         style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
                       ),
-                    // Show "Get Suggestion" button ONLY for medicine name field
                     if (isMedicineNameField)
                       Column(
                         children: [
@@ -885,18 +733,17 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                             onPressed: isSuggesting || dialogInputController.text.isEmpty || dialogInputController.text == 'Listening...' || dialogInputController.text == 'Processing...' || dialogInputController.text == 'Failed to transcribe.'
                                 ? null
                                 : () async {
-                                    setDialogState(() {
-                                      isSuggesting = true;
-                                      suggestedMedicine = 'Suggesting...';
-                                    });
-                                    // Pass the patient summary for context
-                                    final suggestion = await _getMedicineSuggestion(dialogInputController.text, widget.summaryText);
-                                    setDialogState(() {
-                                      suggestedMedicine = suggestion;
-                                      isSuggesting = false;
-                                    });
-                                  },
-                            icon: isSuggesting ? const CircularProgressIndicator(strokeWidth: 2) : const Icon(Icons.lightbulb_outline),
+                                      setDialogState(() {
+                                        isSuggesting = true;
+                                        suggestedMedicine = 'Suggesting...';
+                                      });
+                                      final suggestion = await _getMedicineSuggestionFromBackend(dialogInputController.text, widget.summaryText);
+                                      setDialogState(() {
+                                        suggestedMedicine = suggestion;
+                                        isSuggesting = false;
+                                      });
+                                    },
+                            icon: isSuggesting ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.lightbulb_outline),
                             label: Text(isSuggesting ? 'Suggesting...' : 'Get Suggestion'),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: currentTheme.primaryColor,
@@ -914,15 +761,14 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                                       'Suggested: $suggestedMedicine',
                                       style: currentTheme.textTheme.bodyMedium?.copyWith(
                                         fontWeight: FontWeight.bold,
-                                        color: suggestedMedicine == 'N/A' || suggestedMedicine == 'N/A (No data)' ? Colors.red : currentTheme.primaryColor,
+                                        color: suggestedMedicine == 'N/A' ? Colors.red : currentTheme.primaryColor,
                                       ),
                                     ),
                                   ),
-                                  if (suggestedMedicine != 'N/A' && suggestedMedicine != 'N/A (No data)')
+                                  if (suggestedMedicine != 'N/A')
                                     IconButton(
                                       icon: const Icon(Icons.check_circle, color: Colors.green),
                                       onPressed: () {
-                                        // When accepted, pop with the suggested value
                                         Navigator.of(context).pop(suggestedMedicine);
                                       },
                                     ),
@@ -938,13 +784,13 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                 TextButton(
                   child: Text('Cancel', style: TextStyle(color: currentTheme.hintColor)),
                   onPressed: () {
-                    Navigator.of(context).pop(null); // Pop with null on cancel
+                    Navigator.of(context).pop(null);
                   },
                 ),
                 TextButton(
                   child: Text('Apply (Current Text)', style: TextStyle(color: currentTheme.primaryColor)),
                   onPressed: () {
-                    Navigator.of(context).pop(dialogInputController.text); // Pop with current text
+                    Navigator.of(context).pop(dialogInputController.text);
                   },
                 ),
               ],
@@ -954,32 +800,30 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
       },
     );
 
-    // Dispose the local controller after the dialog closes
     WidgetsBinding.instance.addPostFrameCallback((_) {
       dialogInputController.dispose();
     });
-    return result; // Return the result from the dialog
+    return result;
   }
 
-  // NEW: Dialog for comprehensive voice input for multiple medicines
-  // This dialog now returns a List<MedicinePrescription>? result
+  // --- NEW: Dialog for comprehensive voice input for multiple medicines ---
   Future<List<MedicinePrescription>?> _showComprehensiveVoiceInputDialog() async {
     TextEditingController comprehensiveInputController = TextEditingController();
     String currentTranscribedText = '';
     bool isDialogRecording = false;
     bool isExtracting = false;
     String dialogError = '';
-    double dialogAudioLevel = 0.0; // LOCAL variable for audio level in dialog
-    String? selectedLanguage = 'English'; // Default to English for comprehensive input
+    double dialogAudioLevel = 0.0;
+    String? selectedLanguage = 'English';
     String? selectedLanguageCode = 'en';
 
-    final result = await showDialog<List<MedicinePrescription>>( // Dialog now returns List<MedicinePrescription>?
+    final result = await showDialog<List<MedicinePrescription>>(
       context: context,
       barrierDismissible: false,
       builder: (BuildContext context) {
         final ThemeData currentTheme = Theme.of(context);
         return StatefulBuilder(
-          builder: (context, setDialogState) {
+          builder: (BuildContext context, StateSetter setDialogState) {
             return AlertDialog(
               backgroundColor: currentTheme.cardTheme.color,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
@@ -993,7 +837,6 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                       style: currentTheme.textTheme.bodyMedium,
                     ),
                     const SizedBox(height: 15),
-                    // Language selection for comprehensive voice input
                     DropdownButton<String>(
                       value: selectedLanguage,
                       onChanged: (String? newValue) {
@@ -1020,26 +863,24 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                           return;
                         }
                         if (await _audioRecorder.isRecording()) {
-                          // Stop recording
                           await _audioLevelSubscription?.cancel();
                           _audioLevelSubscription = null;
                           String? path = await _audioRecorder.stop();
                           setDialogState(() {
                             isDialogRecording = false;
-                            dialogAudioLevel = 0.0; // Reset local audio level
+                            dialogAudioLevel = 0.0;
                             currentTranscribedText = 'Processing...';
                           });
                           if (path != null) {
                             File audioFile = File(path);
                             List<int> audioBytes = await audioFile.readAsBytes();
                             String audioBase64 = base64Encode(audioBytes);
-                            final transcribed = await _performASR(audioBase64, selectedLanguageCode!); 
+                            final transcribed = await _performASR(audioBase64, selectedLanguageCode!);
                             setDialogState(() {
                               currentTranscribedText = transcribed ?? 'Failed to transcribe.';
                               dialogError = transcribed == null ? 'Failed to transcribe audio.' : '';
-                              // Update the text controller with transcribed text
                               comprehensiveInputController.text = currentTranscribedText;
-                              comprehensiveInputController.selection = TextSelection.fromPosition(TextPosition(offset: comprehensiveInputController.text.length)); // Move cursor to end
+                              comprehensiveInputController.selection = TextSelection.fromPosition(TextPosition(offset: comprehensiveInputController.text.length));
                             });
                           } else {
                             setDialogState(() {
@@ -1048,18 +889,17 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                             });
                           }
                         } else {
-                          // Start recording
                           setDialogState(() {
                             isDialogRecording = true;
                             currentTranscribedText = 'Listening...';
                             dialogError = '';
-                            comprehensiveInputController.text = ''; // Clear previous text
+                            comprehensiveInputController.text = '';
                           });
                           Directory tempDir = await getTemporaryDirectory();
                           _audioFilePath = '${tempDir.path}/temp_audio_comprehensive.wav';
                           _audioLevelSubscription = _audioRecorder.onAmplitudeChanged(const Duration(milliseconds: 100)).listen((amp) {
                             setDialogState(() {
-                              dialogAudioLevel = amp.current; // Update local audio level
+                              dialogAudioLevel = amp.current;
                             });
                           });
                           await _audioRecorder.start(
@@ -1077,10 +917,9 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                       ),
                     ),
                     const SizedBox(height: 10),
-                    // Display audio level if recording
                     if (isDialogRecording)
                       Text(
-                        'Audio Level: ${dialogAudioLevel.toStringAsFixed(2)} dB', // Use local dialogAudioLevel
+                        'Audio Level: ${dialogAudioLevel.toStringAsFixed(2)} dB',
                         textAlign: TextAlign.center,
                         style: currentTheme.textTheme.bodySmall,
                       ),
@@ -1112,22 +951,24 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                                   isExtracting = true;
                                   dialogError = '';
                                 });
-                                final extractedMedicines = await _extractMedicinesFromVoiceInput(comprehensiveInputController.text);
+                                final extractedMedicines = await _extractMedicinesFromVoiceInputBackend(comprehensiveInputController.text);
                                 setDialogState(() {
                                   isExtracting = false;
-                                  if (extractedMedicines!.isNotEmpty) {
-                                    Navigator.of(context).pop(extractedMedicines); // Pop with the list of medicines
+                                  if (extractedMedicines != null && extractedMedicines.isNotEmpty) {
+                                    Navigator.of(context).pop(extractedMedicines);
                                   } else {
                                     dialogError = 'No medicines extracted. Please refine input or try again.';
                                   }
                                 });
                               },
-                      icon: isExtracting ? const CircularProgressIndicator(strokeWidth: 2) : const Icon(Icons.playlist_add),
+                      icon: isExtracting ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.playlist_add),
                       label: Text(isExtracting ? 'Extracting...' : 'Extract & Add Medicines'),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: currentTheme.primaryColor,
                         foregroundColor: currentTheme.colorScheme.onPrimary,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        elevation: 3,
                       ),
                     ),
                   ],
@@ -1137,7 +978,7 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
                 TextButton(
                   child: Text('Cancel', style: TextStyle(color: currentTheme.hintColor)),
                   onPressed: () {
-                    Navigator.of(context).pop(null); // Pop with null on cancel
+                    Navigator.of(context).pop(null);
                   },
                 ),
               ],
@@ -1147,17 +988,63 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
       },
     );
 
-    // Dispose the local controller after the dialog closes
     WidgetsBinding.instance.addPostFrameCallback((_) {
       comprehensiveInputController.dispose();
     });
     return result;
+  }
 
+  // Widget to build a single medicine card with editable fields
+  Widget _buildEditableField(
+    BuildContext context, {
+    required String label,
+    required TextEditingController controller,
+    required IconData icon,
+    required Future<void> Function(TextEditingController) onVoiceInput,
+    required Key fieldKey,
+  }) {
+    final ThemeData currentTheme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Icon(icon, color: currentTheme.primaryColor, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: TextField(
+              key: fieldKey,
+              controller: controller,
+              decoration: InputDecoration(
+                labelText: label,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(color: currentTheme.primaryColor),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(color: currentTheme.colorScheme.secondary, width: 2),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                isDense: true,
+              ),
+              style: currentTheme.textTheme.bodyLarge,
+              cursorColor: currentTheme.primaryColor,
+            ),
+          ),
+          const SizedBox(width: 10),
+          IconButton(
+            icon: Icon(Icons.mic, color: currentTheme.colorScheme.secondary),
+            onPressed: () => onVoiceInput(controller),
+            tooltip: 'Voice input for $label',
+          ),
+        ],
+      ),
+    );
   }
 
   // Widget to build a single medicine card with editable fields
   Widget _buildMedicineCard(MedicinePrescription medicine, int index, ThemeData currentTheme) {
-    // Get or create controllers for each field using the medicine's ID
     TextEditingController nameController = _getOrCreateController(medicine.id, 'name', medicine.name);
     TextEditingController dosageController = _getOrCreateController(medicine.id, 'dosage', medicine.dosage);
     TextEditingController durationController = _getOrCreateController(medicine.id, 'duration', medicine.duration);
@@ -1165,12 +1052,11 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
     TextEditingController timingController = _getOrCreateController(medicine.id, 'timing', medicine.timing);
 
     return Card(
-      // ValueKey is crucial for stable widget identity in ListView.builder
-      key: ValueKey(medicine.id), 
-      margin: const EdgeInsets.symmetric(vertical: 10),
-      elevation: currentTheme.cardTheme.elevation,
-      shape: currentTheme.cardTheme.shape,
-      color: currentTheme.cardTheme.color,
+      key: ValueKey(medicine.id),
+      margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+      color: currentTheme.cardColor,
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
@@ -1181,146 +1067,105 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
               children: [
                 Text(
                   'Medicine ${index + 1}',
-                  style: currentTheme.textTheme.titleMedium?.copyWith(color: currentTheme.primaryColor),
+                  style: currentTheme.textTheme.titleLarge?.copyWith(
+                    color: currentTheme.primaryColor,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 IconButton(
-                  icon: Icon(Icons.delete, color: Colors.red[400]),
+                  icon: Icon(Icons.delete, color: Colors.red[600], size: 24),
                   onPressed: () => _removeMedicine(medicine.id),
+                  tooltip: 'Remove Medicine',
                 ),
               ],
             ),
-            const Divider(height: 10, thickness: 1), // Reduced divider height
+            const Divider(height: 20, thickness: 1.5, color: Colors.grey),
             _buildEditableField(
               context,
               label: 'Name',
               controller: nameController,
               icon: Icons.medication,
-              onVoiceInput: (currentController) async { // Make this async
+              onVoiceInput: (currentController) async {
                 final resultText = await _showVoiceInputDialog(
                   initialText: currentController.text,
                   isMedicineNameField: true,
                 );
-                if (resultText != null && mounted) { // Check mounted before updating controller
+                if (resultText != null && mounted) {
                   currentController.text = resultText;
                   currentController.selection = TextSelection.fromPosition(TextPosition(offset: currentController.text.length));
                 }
               },
-              fieldKey: ValueKey('${medicine.id}_name'), // Add unique key to TextField
+              fieldKey: ValueKey('${medicine.id}_name'),
             ),
             _buildEditableField(
               context,
               label: 'Dosage',
               controller: dosageController,
               icon: Icons.medical_information,
-              onVoiceInput: (currentController) async { // Make this async
+              onVoiceInput: (currentController) async {
                 final resultText = await _showVoiceInputDialog(
                   initialText: currentController.text,
                   isMedicineNameField: false,
                 );
-                if (resultText != null && mounted) { // Check mounted before updating controller
+                if (resultText != null && mounted) {
                   currentController.text = resultText;
                   currentController.selection = TextSelection.fromPosition(TextPosition(offset: currentController.text.length));
                 }
               },
-              fieldKey: ValueKey('${medicine.id}_dosage'), // Add unique key to TextField
+              fieldKey: ValueKey('${medicine.id}_dosage'),
             ),
             _buildEditableField(
               context,
               label: 'Duration',
               controller: durationController,
               icon: Icons.calendar_today,
-              onVoiceInput: (currentController) async { // Make this async
+              onVoiceInput: (currentController) async {
                 final resultText = await _showVoiceInputDialog(
                   initialText: currentController.text,
                   isMedicineNameField: false,
                 );
-                if (resultText != null && mounted) { // Check mounted before updating controller
+                if (resultText != null && mounted) {
                   currentController.text = resultText;
                   currentController.selection = TextSelection.fromPosition(TextPosition(offset: currentController.text.length));
                 }
               },
-              fieldKey: ValueKey('${medicine.id}_duration'), // Add unique key to TextField
+              fieldKey: ValueKey('${medicine.id}_duration'),
             ),
             _buildEditableField(
               context,
               label: 'Frequency',
               controller: frequencyController,
               icon: Icons.access_time,
-              onVoiceInput: (currentController) async { // Make this async
+              onVoiceInput: (currentController) async {
                 final resultText = await _showVoiceInputDialog(
                   initialText: currentController.text,
                   isMedicineNameField: false,
                 );
-                if (resultText != null && mounted) { // Check mounted before updating controller
+                if (resultText != null && mounted) {
                   currentController.text = resultText;
                   currentController.selection = TextSelection.fromPosition(TextPosition(offset: currentController.text.length));
                 }
               },
-              fieldKey: ValueKey('${medicine.id}_frequency'), // Add unique key to TextField
+              fieldKey: ValueKey('${medicine.id}_frequency'),
             ),
             _buildEditableField(
               context,
               label: 'Timing',
               controller: timingController,
-              icon: Icons.fastfood,
-              onVoiceInput: (currentController) async { // Make this async
+              icon: Icons.schedule,
+              onVoiceInput: (currentController) async {
                 final resultText = await _showVoiceInputDialog(
                   initialText: currentController.text,
                   isMedicineNameField: false,
                 );
-                if (resultText != null && mounted) { // Check mounted before updating controller
+                if (resultText != null && mounted) {
                   currentController.text = resultText;
                   currentController.selection = TextSelection.fromPosition(TextPosition(offset: currentController.text.length));
                 }
               },
-              fieldKey: ValueKey('${medicine.id}_timing'), // Add unique key to TextField
+              fieldKey: ValueKey('${medicine.id}_timing'),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  // Helper widget for editable text fields with voice input icon
-  // onVoiceInput now takes the controller as an argument
-  Widget _buildEditableField(
-    BuildContext context, {
-    required String label,
-    required TextEditingController controller,
-    required IconData icon,
-    required Function(TextEditingController) onVoiceInput, // Changed signature
-    required Key fieldKey, // Added Key parameter for TextField
-  }) {
-    final ThemeData currentTheme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6.0), // Reduced vertical padding
-      child: TextField(
-        key: fieldKey, // Assign the key here
-        controller: controller,
-        style: currentTheme.textTheme.bodyMedium,
-        decoration: InputDecoration(
-          labelText: label,
-          prefixIcon: Icon(icon, color: currentTheme.inputDecorationTheme.prefixIconColor),
-          suffixIcon: IconButton(
-            icon: Icon(Icons.mic, color: currentTheme.primaryColor),
-            onPressed: () => onVoiceInput(controller), // Pass the controller to the callback
-          ),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: BorderSide(color: currentTheme.dividerColor),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: BorderSide(color: currentTheme.dividerColor),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: BorderSide(color: currentTheme.primaryColor, width: 2),
-          ),
-          filled: true,
-          fillColor: currentTheme.inputDecorationTheme.fillColor,
-          labelStyle: currentTheme.inputDecorationTheme.labelStyle,
-          contentPadding: const EdgeInsets.symmetric(vertical: 12.0, horizontal: 10.0), // Smaller content padding
         ),
       ),
     );
@@ -1329,266 +1174,126 @@ class _MedicinesListScreenState extends State<MedicinesListScreen> {
   @override
   Widget build(BuildContext context) {
     final ThemeData currentTheme = Theme.of(context);
-    final dataLoader = Provider.of<DataLoader>(context); // Listen to DataLoader
-
-    // Determine if the app is loading data or Bhashini services
-    final bool isAppLoading = _isLoading || !dataLoader.hasAttemptedLoad || dataLoader.loadError != null || _pipelineConfigResponse == null;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Prescribe Medicines'),
-        backgroundColor: Colors.teal, // Distinct color for this screen
+        title: Text(
+          'Prescribe Medicines',
+          style: currentTheme.appBarTheme.titleTextStyle?.copyWith(
+            fontWeight: FontWeight.bold,
+            color: currentTheme.colorScheme.onPrimary,
+          ),
+        ),
+        backgroundColor: currentTheme.primaryColor,
+        iconTheme: IconThemeData(color: currentTheme.colorScheme.onPrimary),
+        centerTitle: true,
         elevation: 0,
       ),
-      backgroundColor: Colors.teal[50],
-      body: isAppLoading
-          ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: 20),
-                  Text(
-                    _errorMessage.isNotEmpty
-                        ? _errorMessage
-                        : (dataLoader.loadError != null
-                            ? 'Error loading data: ${dataLoader.loadError}'
-                            : 'Loading essential data and AI services...'),
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                ],
-              ),
-            )
-          : Column( // Changed from SingleChildScrollView to Column
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                // --- Patient Information (Read-only) ---
-                Card(
-                  elevation: 4,
-                  margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0), // Reduced vertical margin further
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _errorMessage.isNotEmpty
+              ? Center(
                   child: Padding(
-                    padding: const EdgeInsets.all(12.0), // Reduced padding inside card
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Patient ID: ${widget.patientId}',
-                          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-                        ),
-                        if (widget.chiefComplaint != null && widget.chiefComplaint!.isNotEmpty)
-                          Text(
-                            'Chief Complaint: ${widget.chiefComplaint}',
-                            style: Theme.of(context).textTheme.bodyMedium,
-                          ),
-                        const Divider(height: 5), // Reduced divider height further
-                        Text(
-                          'Summary from Consultation:',
-                          style: Theme.of(context).textTheme.titleSmall?.copyWith(fontStyle: FontStyle.italic),
-                        ),
-                        const SizedBox(height: 3), // Reduced space
-                        Text(
-                          widget.summaryText,
-                          style: currentTheme.textTheme.bodySmall,
-                          maxLines: 2, // Further reduced maxLines for summary
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-
-                // --- Error Message Display ---
-                if (_errorMessage.isNotEmpty && !isAppLoading) // Only show if not initial loading
-                  Container(
-                    padding: const EdgeInsets.all(10), // Reduced padding
-                    margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0), // Reduced vertical margin
-                    decoration: BoxDecoration(
-                      color: Colors.red[100],
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: Colors.redAccent),
-                    ),
+                    padding: const EdgeInsets.all(16.0),
                     child: Text(
                       _errorMessage,
-                      style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+                      textAlign: TextAlign.center,
+                      style: currentTheme.textTheme.headlineSmall?.copyWith(color: Colors.red),
                     ),
                   ),
-
-                // --- Medicines List Title ---
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16.0, 5.0, 16.0, 5.0), // Adjusted top/bottom padding
-                  child: Text(
-                    'Prescribed Medicines:',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.teal[700],
+                )
+              : Column(
+                  children: [
+                    Expanded(
+                      child: ListView.builder(
+                        padding: const EdgeInsets.all(8.0),
+                        itemCount: _medicines.length,
+                        itemBuilder: (context, index) {
+                          return _buildMedicineCard(_medicines[index], index, currentTheme);
+                        },
+                      ),
                     ),
-                  ),
-                ),
-
-                // --- Medicines List (Expanded to take remaining space) ---
-                Expanded(
-                  child: _medicines.isEmpty
-                      ? Center(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 24.0),
-                            child: Text(
-                              'No medicines extracted. Click "Add New Medicine Manually" or "Add Medicines via Voice Input" to start.',
-                              style: currentTheme.textTheme.bodyMedium,
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        )
-                      : ListView.builder(
-                          padding: const EdgeInsets.symmetric(horizontal: 16.0), // Padding for cards inside list
-                          itemCount: _medicines.length,
-                          itemBuilder: (context, index) {
-                            final medicine = _medicines[index];
-                            return _buildMedicineCard(medicine, index, currentTheme);
-                          },
-                        ),
-                ),
-
-                // --- Action Buttons at the bottom ---
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 10.0), // Reduced vertical padding
-                  child: Column(
-                    children: [
-                      ElevatedButton.icon(
-                        onPressed: _isLoading || _medicines.isEmpty ? null : () {
-                          // Convert List<MedicinePrescription> to List<Map<String, dynamic>>
-                          final List<Map<String, dynamic>> medicinesAsJson = _medicines.map((m) => m.toJson()).toList();
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => OpdReportFinalScreen(
-                                patientId: widget.patientId,
-                                summaryText: widget.summaryText,
-                                prescribedMedicines: medicinesAsJson,
-                                chiefComplaint: widget.chiefComplaint,
+                    Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              Expanded(
+                                child: ElevatedButton.icon(
+                                  onPressed: _addNewMedicine,
+                                  icon: const Icon(Icons.add, size: 24),
+                                  label: const Text('Add New Medicine'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: currentTheme.colorScheme.secondary,
+                                    foregroundColor: currentTheme.colorScheme.onSecondary,
+                                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    elevation: 3,
+                                  ),
+                                ),
                               ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: ElevatedButton.icon(
+                                  onPressed: () async {
+                                    final extracted = await _showComprehensiveVoiceInputDialog();
+                                    if (extracted != null && extracted.isNotEmpty && mounted) {
+                                      setState(() {
+                                        _medicines.addAll(extracted.map((item) {
+                                          final newMedicine = MedicinePrescription.fromJson({
+                                            ...item.toJson(),
+                                            'id': item.id.isEmpty ? DateTime.now().microsecondsSinceEpoch.toString() : item.id,
+                                          });
+                                          _getOrCreateController(newMedicine.id, 'name', newMedicine.name);
+                                          _getOrCreateController(newMedicine.id, 'dosage', newMedicine.dosage);
+                                          _getOrCreateController(newMedicine.id, 'duration', newMedicine.duration);
+                                          _getOrCreateController(newMedicine.id, 'frequency', newMedicine.frequency);
+                                          _getOrCreateController(newMedicine.id, 'timing', newMedicine.timing);
+                                          return newMedicine;
+                                        }).toList());
+                                      });
+                                    } else if (extracted != null && extracted.isEmpty && mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(content: Text('No medicines extracted from voice input.')),
+                                      );
+                                    }
+                                  },
+                                  icon: const Icon(Icons.mic_none, size: 24),
+                                  label: const Text('Voice Input (Full)'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: currentTheme.colorScheme.tertiary,
+                                    foregroundColor: currentTheme.colorScheme.onTertiary,
+                                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    elevation: 3,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 15),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton(
+                              onPressed: _medicines.isEmpty ? null : _saveMedicines,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: currentTheme.primaryColor,
+                                foregroundColor: currentTheme.colorScheme.onPrimary,
+                                padding: const EdgeInsets.symmetric(vertical: 15),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                elevation: 5,
+                                textStyle: currentTheme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                              ),
+                              child: const Text('Confirm Medicines & Generate OPD Report'),
                             ),
-                          );
-                        },
-                        icon: const Icon(Icons.arrow_forward, size: 28),
-                        label: const Text(
-                          'Proceed to Final Report',
-                          style: TextStyle(fontSize: 20),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Theme.of(context).primaryColor,
-                          foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                          padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(30),
                           ),
-                          elevation: 5,
-                          minimumSize: Size(MediaQuery.of(context).size.width * 0.7, 60),
-                        ),
+                        ],
                       ),
-                      const SizedBox(height: 10), // Reduced spacing between buttons
-                      ElevatedButton.icon(
-                        onPressed: _isLoading ? null : _addNewMedicine,
-                        icon: const Icon(Icons.add_circle_outline, size: 28),
-                        label: const Text(
-                          'Add New Medicine Manually',
-                          style: TextStyle(fontSize: 18),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blueAccent,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          elevation: 3,
-                        ),
-                      ),
-                      const SizedBox(height: 10), // Reduced spacing between buttons
-                      ElevatedButton.icon(
-                        onPressed: _isLoading ? null : () async {
-                          final extractedMedicines = await _showComprehensiveVoiceInputDialog();
-                          if (extractedMedicines != null && extractedMedicines.isNotEmpty && mounted) {
-                            setState(() {
-                              _medicines.addAll(extractedMedicines.map((newMedicine) {
-                                // Initialize controllers for the newly added medicine
-                                _getOrCreateController(newMedicine.id, 'name', newMedicine.name);
-                                _getOrCreateController(newMedicine.id, 'dosage', newMedicine.dosage);
-                                _getOrCreateController(newMedicine.id, 'duration', newMedicine.duration);
-                                _getOrCreateController(newMedicine.id, 'frequency', newMedicine.frequency);
-                                _getOrCreateController(newMedicine.id, 'timing', newMedicine.timing);
-                                return newMedicine;
-                              }));
-                            });
-                          }
-                        },
-                        icon: const Icon(Icons.mic_none, size: 28),
-                        label: const Text(
-                          'Add Medicines via Voice Input',
-                          style: TextStyle(fontSize: 18),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.purple, // Distinct color for voice input
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          elevation: 3,
-                        ),
-                      ),
-                      const SizedBox(height: 10), // Reduced spacing between buttons
-                      ElevatedButton.icon(
-                        onPressed: () {
-                          Navigator.pop(context); // Go back to Summary Screen
-                        },
-                        icon: const Icon(Icons.arrow_back, size: 28),
-                        label: const Text(
-                          'Go Back',
-                          style: TextStyle(fontSize: 20),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.grey,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(30),
-                          ),
-                          elevation: 5,
-                          minimumSize: Size(MediaQuery.of(context).size.width * 0.7, 60),
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
     );
-  }
-}
-
-// Extend MedicinePrescription to add helpers for field access
-extension MedicinePrescriptionFieldHelpers on MedicinePrescription {
-  String getField(String fieldName) {
-    switch (fieldName) {
-      case 'name': return name;
-      case 'dosage': return dosage;
-      case 'duration': return duration;
-      case 'frequency': return frequency;
-      case 'timing': return timing;
-      default: return '';
-    }
-  }
-
-  void setField(String fieldName, String value) {
-    switch (fieldName) {
-      case 'name': this.name = value; break;
-      case 'dosage': this.dosage = value; break;
-      case 'duration': this.duration = value; break;
-      case 'frequency': this.frequency = value; break;
-      case 'timing': this.timing = value; break;
-    }
   }
 }
